@@ -154,9 +154,12 @@ static void example_event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_para
         handle_custom_data(param->custom_data.data, param->custom_data.data_len);
         break;
     case ESP_BLUFI_EVENT_REQ_CONNECT_TO_AP:
+        
         BLUFI_INFO("收到连接请求，开始连接 Wi-Fi");
         esp_wifi_disconnect();
         esp_wifi_set_config(WIFI_IF_STA, &sta_config);
+        esp_wifi_start();
+
         esp_err_t err = esp_wifi_connect();
         if (err != ESP_OK) {
             BLUFI_ERROR("Wi-Fi 连接启动失败! 错误码: %s", esp_err_to_name(err));

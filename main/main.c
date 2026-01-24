@@ -1,12 +1,19 @@
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
+#include <inttypes.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-// #include "nvs_flash.h"
+#include "freertos/queue.h"
+#include "driver/gpio.h"
+#include "nvs_flash.h"
 #include "esp_wifi.h"
 #include "esp_log.h"
 #include "app_storage.h"  
 #include "blufi_custom.h"
+#include "protocol.h"
+
+
 
 // 未实现的组件
 // #include "bsp_pump_valve.h" 
@@ -17,12 +24,20 @@ static const char *TAG = "MAIN";
 
 #define GPIO_KEY_RESET 0 // 假设 BOOT 键
 
-
+void key_scan_task(void *arg);
+void test_protocol_function(void);
 
 void app_main(void)
 {
+
+
+    
+   
     // 存储与系统初始化
     ESP_ERROR_CHECK(app_storage_init());
+
+    app_storage_erase(RESET_LEVEL_NET);
+
 
     // 网络基础设施初始化
     ESP_ERROR_CHECK(esp_netif_init());
@@ -30,6 +45,9 @@ void app_main(void)
     esp_netif_create_default_wifi_sta();
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+
+    test_protocol_function();
+    
 
     // 读取配置，决定启动模式
     net_config_t net_cfg = {0};
@@ -66,6 +84,36 @@ void app_main(void)
 }
 
 
+void test_protocol_function(void) {
+    // --- 测试打包 ---
+    report_data_t report = {
+        .tds_value = 50,
+        .total_flow = 1200,
+        .filter_life = 95,
+        .error_code = 0
+    };
+    strcpy(report.device_id, "TEST_DEV_001");
+
+    char *json_out = protocol_pack_status(&report);
+    if (json_out) {
+        ESP_LOGI("TEST", "Generated JSON: %s", json_out);
+        free(json_out); // 记得释放！
+    }
+
+    // --- 测试解析 ---
+    const char *test_json = "{\"cmd\": \"wash\", \"param\": 15}";
+    server_cmd_t cmd_out;
+    
+    if (protocol_parse_cmd(test_json, strlen(test_json), &cmd_out) == ESP_OK) {
+        ESP_LOGI("TEST", "Parsed CMD: %s, Param: %d", cmd_out.cmd, cmd_out.param);
+    } else {
+        ESP_LOGE("TEST", "Parse failed");
+    }
+}
+
+
+
+// 按键重置等任务
 void key_scan_task(void *arg) {
     int press_time = 0;
     while (1) {

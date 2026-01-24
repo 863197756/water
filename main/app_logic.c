@@ -1,7 +1,9 @@
 #include <stdio.h>
-
+#include <string.h>
+#include "esp_log.h"
 #include "app_storage.h"
-#include "esp_system.h" // for esp_restart
+#include "esp_system.h" 
+#include "protocol.h"
 
 // 假设这是你处理指令的地方
 void handle_server_cmd(server_cmd_t *cmd) {
