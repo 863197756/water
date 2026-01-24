@@ -1,0 +1,11 @@
+# idf_component_register(
+#     SRCS 
+#         "src/bsp_pump_valve.c"
+#         "src/bsp_sensor.c"
+#         "src/bsp_led.c"
+#     INCLUDE_DIRS 
+#         "include"
+#     PRIV_REQUIRES
+#         driver
+        
+# )
