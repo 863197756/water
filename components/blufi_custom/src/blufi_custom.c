@@ -11,7 +11,7 @@
 #include "esp_log.h"
 #include "esp_blufi_api.h"
 #include "esp_blufi.h"
-#include "app_storage.h"
+
 
 
 #if CONFIG_BT_CONTROLLER_ENABLED || !CONFIG_BT_NIMBLE_ENABLED
@@ -37,11 +37,12 @@
 #include "blufi_custom.h"
 #include "blufi_custom_priv.h"
 #include "json_parser.h" 
+#include "app_storage.h"
 
 static wifi_config_t sta_config;
 static bool gl_sta_connected = false;
 
-// --- [新增] NimBLE 必须的辅助函数与变量 ---
+// --- NimBLE 必须的辅助函数与变量 ---
 #ifdef CONFIG_BT_NIMBLE_ENABLED
 // Blufi GATT Server 初始化函数 (在 IDF 组件内部)
 extern int esp_blufi_gatt_svr_init(void);
@@ -91,17 +92,17 @@ static void handle_custom_data(uint8_t *data, int len) {
         return;
     }
 
-    int mode = 0; // 0=WiFi, 1=4G
-    char server_url[64] = {0};
+    net_config_t cfg = {0};
 
+    int mode_val = 0; // 0=WiFi, 1=4G
     // 提取字段 "mode"
-    if (json_obj_get_int(&jctx, "mode", &mode) == 0) {
-        BLUFI_INFO("设置联网模式: %s", mode == 1 ? "4G" : "Wi-Fi");
+    if (json_obj_get_int(&jctx, "mode", &mode_val) == 0) {
+        cfg.mode = mode_val;
+        BLUFI_INFO("设置联网模式: %s", cfg.mode == 1 ? "4G" : "Wi-Fi");
     }
-
     // 提取字段 "url"
-    if (json_obj_get_string(&jctx, "url", server_url, sizeof(server_url)) == 0) {
-        BLUFI_INFO("设置服务器地址: %s", server_url);
+    if (json_obj_get_string(&jctx, "url", cfg.url, sizeof(cfg.url)) == 0) {
+        BLUFI_INFO("设置服务器地址: %s", cfg.url);
     }
 
     // 3. 清理资源
@@ -109,17 +110,11 @@ static void handle_custom_data(uint8_t *data, int len) {
     free(json_str);
 
     // NVS 保存逻辑
-    net_config_t cfg;
-    cfg.mode = mode;
-    strncpy(cfg.url, server_url, sizeof(cfg.url));
-
-    // 调用通用存储组件
-    app_storage_save_net_config(&cfg);
-    // save_net_config(mode, server_url);
-    
-    // 反馈成功
-    blufi_send_custom_result(true, "Config Saved");
-
+    if (app_storage_save_net_config(&cfg) == ESP_OK) {
+        blufi_send_custom_result(true, "Config Saved");
+    } else {
+        blufi_send_custom_result(false, "Save Failed");
+    }
     // TODO: 这里可以发送一个 Event 或者信号量，通知主程序切换网络状态
 }
 

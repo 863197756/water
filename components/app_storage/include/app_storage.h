@@ -12,6 +12,12 @@ typedef struct {
     int filter_life;    // 滤芯剩余
 } device_status_t;
 
+typedef enum {
+    RESET_LEVEL_NET     = 1, // 仅重置网络 (保留滤芯数据)
+    RESET_LEVEL_FACTORY = 9  // 恢复出厂 (清除所有)
+} reset_level_t;
+
+
 /**
  * @brief 初始化 NVS (在 app_main 最开始调用)
  */
@@ -34,3 +40,11 @@ esp_err_t app_storage_load_status(device_status_t *status);
  * @param action 操作字符串，如 "start_wash"
  */
 esp_err_t app_storage_log_action(const char *action);
+
+
+/**
+ * @brief 执行重置操作
+ * @param level 重置等级
+ * @return esp_err_t
+ */
+esp_err_t app_storage_erase(reset_level_t level);
