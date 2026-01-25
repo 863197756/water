@@ -36,7 +36,7 @@ void app_main(void)
     // 存储与系统初始化
     ESP_ERROR_CHECK(app_storage_init());
 
-    app_storage_erase(RESET_LEVEL_NET);
+    // app_storage_erase(RESET_LEVEL_NET);
 
 
     // 网络基础设施初始化
@@ -46,7 +46,7 @@ void app_main(void)
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
 
-    test_protocol_function();
+    // test_protocol_function();
     
 
     // 读取配置，决定启动模式

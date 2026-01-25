@@ -4,6 +4,7 @@ idf_component_register(
         "app_logic.c" 
         "net_manager.c" 
         "protocol.c"
+        "mqtt_manager.c"
     INCLUDE_DIRS 
         "." 
     
@@ -17,6 +18,7 @@ idf_component_register(
         blufi_custom 
         json_parser 
         json
+        mqtt
         # bsp_driver 
         # modem_4g 
 )
