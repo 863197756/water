@@ -5,6 +5,7 @@ idf_component_register(
         "net_manager.c" 
         "protocol.c"
         "mqtt_manager.c"
+        "time_manager.c"
     INCLUDE_DIRS 
         "." 
     
@@ -19,6 +20,7 @@ idf_component_register(
         json_parser 
         json
         mqtt
+        lwip
         # bsp_driver 
         # modem_4g 
 )

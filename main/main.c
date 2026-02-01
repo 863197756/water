@@ -12,6 +12,7 @@
 #include "app_storage.h"  
 #include "blufi_custom.h"
 #include "protocol.h"
+#include "time_manager.h"
 
 
 
@@ -47,7 +48,9 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
 
     // test_protocol_function();
-    
+    time_manager_init();
+
+
 
     // 读取配置，决定启动模式
     net_config_t net_cfg = {0};
@@ -74,6 +77,9 @@ void app_main(void)
                     ESP_LOGE(TAG, "Wi-Fi 连接启动失败: %s", esp_err_to_name(conn_ret));
                 }
             }
+            char time_str[32];
+            time_manager_get_time_str(time_str, sizeof(time_str));
+            ESP_LOGI(TAG, "当前时间: %s", time_str);    
             return; // 业务启动后退出
         }
     }
