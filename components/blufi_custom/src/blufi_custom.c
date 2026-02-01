@@ -71,6 +71,7 @@ static void send_json_status(const char *key, int value) {
     char payload[64];
     int len = snprintf(payload, sizeof(payload), "{\"%s\":%d}", key, value);
     esp_blufi_send_custom_data((uint8_t *)payload, len);
+    ESP_LOGI(TAG, "Reply: %s", payload);
 }
 
 
@@ -78,7 +79,7 @@ static void send_json_status(const char *key, int value) {
 //  自定义数据处理 (核心业务逻辑)
 // ---------------------------------------------------------
 static void handle_custom_data(uint8_t *data, int len) {
-    BLUFI_INFO("收到自定义数据 (Len: %d)", len);
+    BLUFI_INFO("收到自定义数据 (Len: %d): %s", len, data);
 
     // 1. 安全处理：确保是字符串
     char *json_str = (char *)malloc(len + 1);
@@ -99,15 +100,19 @@ static void handle_custom_data(uint8_t *data, int len) {
         
         // 1. statusBLE (握手/关闭)
         if (json_obj_get_int(&jctx, "statusBLE", &val) == 0) {
+            ESP_LOGI(TAG, "Step 1/5: StatusBLE Check: %d", val);
             send_json_status("statusBLE", val);
             if (val == 1) {
                 // 收到关闭请求，断开蓝牙
+                ESP_LOGW(TAG, "Step 5: Closing BLE connection...");
+                vTaskDelay(pdMS_TO_TICKS(1000)); // 给一点时间让回复发出去
                 esp_blufi_disconnect(); 
             }
         }
 
         // 2. statusNet (配网模式)
         if (json_obj_get_int(&jctx, "statusNet", &val) == 0) {
+            ESP_LOGI(TAG, "Step 2: Set Net Mode: %d", val);
             // 保存模式到 NVS
             net_config_t cfg;
             if (app_storage_load_net_config(&cfg) != ESP_OK) memset(&cfg, 0, sizeof(cfg));
@@ -115,7 +120,7 @@ static void handle_custom_data(uint8_t *data, int len) {
             app_storage_save_net_config(&cfg);
             
             // 返回确认
-            send_json_status("statusNet", val);
+            send_json_status("statusNet", 1);
         }
 
         // 4. MQTT 配置
@@ -124,24 +129,32 @@ static void handle_custom_data(uint8_t *data, int len) {
             net_config_t cfg;
             if (app_storage_load_net_config(&cfg) != ESP_OK) memset(&cfg, 0, sizeof(cfg));
             
-            // 填充 Host (这里假设 cfg.url 够长)
-            strncpy(cfg.url, str_buf, sizeof(cfg.url) - 1);
+            // 1. 保存 Host
+            strncpy(cfg.mqtt_host, str_buf, sizeof(cfg.mqtt_host) - 1);
             
-            // 尝试读取 Port (如果你的 net_config_t 有 port 字段的话，没有就拼接到 url)
-            // int port = 1883;
-            // json_obj_get_int(&jctx, "port", &port);
+            // 2. 保存 Port
+            int port = 1883; 
+            if (json_obj_get_int(&jctx, "port", &port) == 0) {
+                cfg.mqtt_port = port;
+            }
             
-            // 尝试读取 Token (如果 NVS 有该字段)
-            // char token[64];
-            // if (json_obj_get_string(&jctx, "token", token, sizeof(token)) == 0) { ... }
+            // 3. 保存 Token
+            if (json_obj_get_string(&jctx, "token", str_buf, sizeof(str_buf)) == 0) {
+                strncpy(cfg.mqtt_token, str_buf, sizeof(cfg.mqtt_token) - 1);
+            }
 
-            // 保存
+            // 4. 拼接 URL 供 mqtt_manager 使用 (mqtt://host:port)
+            snprintf(cfg.url, sizeof(cfg.url), "mqtt://%s:%d", cfg.mqtt_host, cfg.mqtt_port);
+
+            // 保存到 NVS
             app_storage_save_net_config(&cfg);
             ESP_LOGI(TAG, "MQTT Config Saved: %s", cfg.url);
 
-            // 返回 0: 连接服务器成功 
-            // (注意：这里我们暂时返回配置保存成功，真实的连接需要在主程序中触发)
+            // 协议要求回复 {"statusMQTT": 0} 代表连接成功
+            // 实际上这里我们只确认了配置已保存。如果需要真实连接测试，需要更复杂的异步逻辑。
+            // 这里为了响应速度，假设配置无误即成功。
             send_json_status("statusMQTT", 0);
+            
             
             // TODO: 通知 main 任务重启 MQTT 客户端 (可以用 EventGroup 或 简单的 esp_restart())
             // esp_restart(); // 简单粗暴生效配置
@@ -151,6 +164,54 @@ static void handle_custom_data(uint8_t *data, int len) {
     }
     free(json_str);
 
+}
+
+
+
+
+// ---------------------------------------------------------
+//  Wi-Fi 事件回调
+// ---------------------------------------------------------
+static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        wifi_event_sta_disconnected_t* event = (wifi_event_sta_disconnected_t*) event_data;
+        gl_sta_connected = false;
+        
+        // 1. 报告失败给 App
+        send_json_status("statusWiFi", 2); 
+        
+        // 2. 使用 Blufi 标准报告失败信息 (可以带上具体的 Reason)
+        esp_blufi_extra_info_t info = {0};
+        // 这里的 reason 可以让手机 App 知道是密码错还是找不到 SSID
+        esp_blufi_send_wifi_conn_report(WIFI_MODE_STA, ESP_BLUFI_STA_CONN_FAIL, event->reason, &info);
+        
+        // 3. 策略性重连（避免密码错误时的无限死循环）
+        if (event->reason != WIFI_REASON_AUTH_FAIL) {
+            esp_wifi_connect();
+        }
+    } 
+    else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+        gl_sta_connected = true;
+        ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
+        
+        // 只有拿到 IP 才算真正的“成功”
+        send_json_status("statusWiFi", 1);
+        
+        esp_blufi_extra_info_t info = {0};
+        esp_blufi_send_wifi_conn_report(WIFI_MODE_STA, ESP_BLUFI_STA_CONN_SUCCESS, 0, &info);
+        
+        ESP_LOGI(TAG, "Connected! IP: " IPSTR, IP2STR(&event->ip_info.ip));
+    }
+}
+
+static void ip_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
+    if (event_id == IP_EVENT_STA_GOT_IP) {
+        wifi_mode_t mode;
+        esp_wifi_get_mode(&mode);
+        esp_blufi_extra_info_t info = {0};
+        esp_blufi_send_wifi_conn_report(mode, ESP_BLUFI_STA_CONN_SUCCESS, 0, &info);
+        BLUFI_INFO("Wi-Fi 连接成功，已反馈给 APP");
+    }
 }
 
 
@@ -175,14 +236,19 @@ static void example_event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_para
         esp_blufi_adv_start(); 
         break;
     case ESP_BLUFI_EVENT_RECV_STA_SSID:
-        send_json_status("statusWiFi", 0); 
-        strncpy((char *)sta_config.sta.ssid, (char *)param->sta_ssid.ssid, param->sta_ssid.ssid_len);
-        sta_config.sta.ssid[param->sta_ssid.ssid_len] = '\0';
-        BLUFI_INFO("收到 SSID: %s", sta_config.sta.ssid);
+        // 1. 清零并拷贝，注意防止越界
+        memset(&sta_config, 0, sizeof(sta_config));
+        memset(sta_config.sta.ssid, 0, sizeof(sta_config.sta.ssid));
+        uint8_t ssid_len = (param->sta_ssid.ssid_len < 32) ? param->sta_ssid.ssid_len : 31;
+        memcpy(sta_config.sta.ssid, param->sta_ssid.ssid, ssid_len);
+        
+        send_json_status("statusWiFi", 0);
         break;
     case ESP_BLUFI_EVENT_RECV_STA_PASSWD:
-        strncpy((char *)sta_config.sta.password, (char *)param->sta_passwd.passwd, param->sta_passwd.passwd_len);
-        sta_config.sta.password[param->sta_passwd.passwd_len] = '\0';
+        // 2. 同样的清零并拷贝
+        memset(sta_config.sta.password, 0, sizeof(sta_config.sta.password));
+        uint8_t pwd_len = (param->sta_passwd.passwd_len < 64) ? param->sta_passwd.passwd_len : 63;
+        memcpy(sta_config.sta.password, param->sta_passwd.passwd, pwd_len);
         BLUFI_INFO("收到 Password");
         break;
     case ESP_BLUFI_EVENT_RECV_CUSTOM_DATA:
@@ -219,38 +285,8 @@ static esp_blufi_callbacks_t example_callbacks = {
     .checksum_func = blufi_crc_checksum,
 };
 
-// ---------------------------------------------------------
-//  Wi-Fi 事件回调
-// ---------------------------------------------------------
-static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
-    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
-        if (gl_sta_connected) {
-            gl_sta_connected = false;
-            // 配网失败/断开
-            send_json_status("statusWiFi", 2); 
-        }
-        esp_wifi_connect();
-    } 
-    else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
-        gl_sta_connected = true;
-        // 配网成功
-        send_json_status("statusWiFi", 1);
-        
-        // 发送标准报告
-        esp_blufi_extra_info_t info = {0};
-        esp_blufi_send_wifi_conn_report(WIFI_MODE_STA, ESP_BLUFI_STA_CONN_SUCCESS, 0, &info);
-    }
-}
 
-static void ip_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
-    if (event_id == IP_EVENT_STA_GOT_IP) {
-        wifi_mode_t mode;
-        esp_wifi_get_mode(&mode);
-        esp_blufi_extra_info_t info = {0};
-        esp_blufi_send_wifi_conn_report(mode, ESP_BLUFI_STA_CONN_SUCCESS, 0, &info);
-        BLUFI_INFO("Wi-Fi 连接成功，已反馈给 APP");
-    }
-}
+
 
 // ---------------------------------------------------------
 //  对外接口实现

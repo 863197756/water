@@ -31,42 +31,31 @@ esp_err_t app_storage_save_net_config(const net_config_t *cfg) {
     err = nvs_open(NS_NET_CFG, NVS_READWRITE, &handle);
     if (err != ESP_OK) return err;
 
-    err = nvs_set_i32(handle, "mode", cfg->mode);
+    err = nvs_set_blob(handle, NET_CONFIG_KEY, cfg, sizeof(net_config_t));
     if (err == ESP_OK) {
-        err = nvs_set_str(handle, "url", cfg->url);
+        err = nvs_commit(handle);
+        ESP_LOGI(TAG, "Config saved to NVS. Mode: %d, SSID: %s", cfg->mode, cfg->ssid);
     }
-
-    nvs_commit(handle);
     nvs_close(handle);
-    ESP_LOGI(TAG, "Net config saved: mode=%d, url=%s", cfg->mode, cfg->url);
     return err;
 }
 
 esp_err_t app_storage_load_net_config(net_config_t *cfg) {
-    nvs_handle_t handle;
-    esp_err_t err;
-
-    err = nvs_open(NS_NET_CFG, NVS_READONLY, &handle);
+    nvs_handle_t my_handle;
+    esp_err_t err = nvs_open(NET_CONFIG_NAMESPACE, NVS_READONLY, &my_handle);
     if (err != ESP_OK) return err;
 
-    int32_t mode = 0;
-    size_t url_len = sizeof(cfg->url);
+    size_t required_size = sizeof(net_config_t);
+    err = nvs_get_blob(my_handle, NET_CONFIG_KEY, cfg, &required_size);
     
-    // 读取 Mode
-    if (nvs_get_i32(handle, "mode", &mode) == ESP_OK) {
-        cfg->mode = (int)mode;
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "Config loaded. Mode: %d, MQTT: %s", cfg->mode, cfg->url);
     } else {
-        cfg->mode = 0; // 默认 WiFi
-    }
-    
-    // 读取 url，若不存在则设为空字符串
-    if (nvs_get_str(handle, "url", cfg->url, &url_len) != ESP_OK) {
-        // 默认值
-        strcpy(cfg->url, "");
+        ESP_LOGW(TAG, "No config found in NVS");
     }
 
-    nvs_close(handle);
-    return ESP_OK;
+    nvs_close(my_handle);
+    return err;
 }
 
 

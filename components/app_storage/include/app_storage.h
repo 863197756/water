@@ -1,10 +1,23 @@
 #pragma once
 #include "esp_err.h"
 
+#define NET_CONFIG_NAMESPACE "net_cfg"
+#define NET_CONFIG_KEY       "config"
+
+
 // 定义一些结构体方便数据交互
 typedef struct {
-    int mode;           // 0: WiFi, 1: 4G
-    char url[64];       // 服务器地址
+    int mode;             // 0: WiFi, 1: 4G
+    char ssid[32];        // WiFi SSID
+    char password[64];    // WiFi Password
+    
+    // 新增 MQTT 配置字段
+    char mqtt_host[64];   // 例如 "iot.example.com"
+    int  mqtt_port;       // 例如 1883
+    char mqtt_token[64];  // 例如 "abcdefg" (可能用于 username 或 clientID)
+    
+    // 兼容字段
+    char url[128];        // 完整 URL, 由 host+port 拼接: "mqtt://host:port"
 } net_config_t;
 
 typedef struct {

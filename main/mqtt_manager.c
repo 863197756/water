@@ -84,12 +84,14 @@ void mqtt_manager_start(void) {
     }
 
     ESP_LOGI(TAG, "Starting MQTT client to %s", cfg.url);
+    ESP_LOGI(TAG, "MQTT Token: %s", cfg.mqtt_token);
 
     // 2. 配置客户端
     esp_mqtt_client_config_t mqtt_cfg = {
         .broker.address.uri = cfg.url,
-        // 如果有用户名密码，可以在这里从 cfg 读取并赋值
-        // .credentials.username = ... 
+        // 如果 Token 用作 Username，可以这样赋值：
+        .credentials.username = (strlen(cfg.mqtt_token) > 0) ? cfg.mqtt_token : NULL,
+        // 如果 Token 是用来鉴权的密码或 Header，请根据实际服务器要求调整
     };
 
     s_client = esp_mqtt_client_init(&mqtt_cfg);
