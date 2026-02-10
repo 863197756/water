@@ -18,6 +18,24 @@ typedef struct {
 } server_cmd_t;
 
 /**
+ * @brief 获取设备唯一ID (基于MAC地址的 hex 字符串)
+ * @param out_id 输出缓冲区 (至少 17 字节)
+ */
+void protocol_get_device_id(char *out_id);
+
+/**
+ * @brief 获取设备 MAC 地址字符串 (e.g., "58:bf:25:a9:ee:58")
+ * @param out_mac 输出缓冲区 (至少 18 字节)
+ */
+void protocol_get_mac_str(char *out_mac);
+
+/**
+ * @brief 生成设备初始化注册 JSON (发布到 iot_purifier/init)
+ * @return char* JSON 字符串 (调用者需 free)
+ */
+char* protocol_pack_init_data(void);
+
+/**
  * @brief [打包] 将设备状态打包为 JSON 字符串
  * @param data 设备状态结构体
  * @return char* JSON 字符串 (注意：使用完必须 free!)

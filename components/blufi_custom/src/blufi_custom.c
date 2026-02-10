@@ -11,7 +11,8 @@
 #include "esp_log.h"
 #include "esp_blufi_api.h"
 #include "esp_blufi.h"
-
+#include "blufi_custom.h"
+#include "mqtt_manager.h"
 
 
 #if CONFIG_BT_CONTROLLER_ENABLED || !CONFIG_BT_NIMBLE_ENABLED
@@ -39,7 +40,7 @@
 #include "json_parser.h" 
 #include "app_storage.h"
 
-static const char *TAG = "BLUFI_CUSTOM";
+static const char *TAG = "BLUFI";
 
 static wifi_config_t sta_config;
 static bool gl_sta_connected = false;
@@ -50,6 +51,14 @@ static bool gl_sta_connected = false;
 extern int esp_blufi_gatt_svr_init(void);
 // 其它回调
 void ble_store_config_init(void);
+
+void blufi_send_mqtt_status(int status) {
+    char payload[64];
+    int len = snprintf(payload, sizeof(payload), "{\"statusMQTT\":%d}", status);
+    esp_blufi_send_custom_data((uint8_t *)payload, len);
+    ESP_LOGI(TAG, "Sent via BLE: %s", payload);
+}
+
 
 static void blufi_on_reset(int reason) {
     BLUFI_ERROR("NimBLE Reset: reason=%d", reason);
@@ -124,40 +133,49 @@ static void handle_custom_data(uint8_t *data, int len) {
         }
 
         // 4. MQTT 配置
-        if (json_obj_get_string(&jctx, "mqttHost", str_buf, sizeof(str_buf)) == 0) {
-            // 解析完整配置
-            net_config_t cfg;
-            if (app_storage_load_net_config(&cfg) != ESP_OK) memset(&cfg, 0, sizeof(cfg));
-            
-            // 1. 保存 Host
-            strncpy(cfg.mqtt_host, str_buf, sizeof(cfg.mqtt_host) - 1);
-            
-            // 2. 保存 Port
-            int port = 1883; 
-            if (json_obj_get_int(&jctx, "port", &port) == 0) {
-                cfg.mqtt_port = port;
-            }
-            
-            // 3. 保存 Token
-            if (json_obj_get_string(&jctx, "token", str_buf, sizeof(str_buf)) == 0) {
-                strncpy(cfg.mqtt_token, str_buf, sizeof(cfg.mqtt_token) - 1);
-            }
+        har mqtt_server_buf[64] = {0};
+        char username_buf[64] = {0};
+        char password_buf[64] = {0};
 
-            // 4. 拼接 URL 供 mqtt_manager 使用 (mqtt://host:port)
-            snprintf(cfg.url, sizeof(cfg.url), "mqtt://%s:%d", cfg.mqtt_host, cfg.mqtt_port);
+        // 解析 mqttserver: "IP:Port"
+        if (json_obj_get_string(&jctx, "mqttserver", mqtt_server_buf, sizeof(mqtt_server_buf)) == 0) {
+            ESP_LOGI(TAG, "[Step 4] Recv MQTT Config: %s", mqtt_server_buf);
+            
+            // 获取用户名和密码
+            json_obj_get_string(&jctx, "username", username_buf, sizeof(username_buf));
+            json_obj_get_string(&jctx, "password", password_buf, sizeof(password_buf));
 
             // 保存到 NVS
-            app_storage_save_net_config(&cfg);
-            ESP_LOGI(TAG, "MQTT Config Saved: %s", cfg.url);
+            net_config_t cfg;
+            if (app_storage_load_net_config(&cfg) != ESP_OK) memset(&cfg, 0, sizeof(cfg));
 
-            // 协议要求回复 {"statusMQTT": 0} 代表连接成功
-            // 实际上这里我们只确认了配置已保存。如果需要真实连接测试，需要更复杂的异步逻辑。
-            // 这里为了响应速度，假设配置无误即成功。
-            send_json_status("statusMQTT", 0);
+            // 解析 IP 和 Port
+            char *colon = strchr(mqtt_server_buf, ':');
+            if (colon) {
+                *colon = '\0'; // 截断字符串
+                strncpy(cfg.mqtt_host, mqtt_server_buf, sizeof(cfg.mqtt_host) - 1);
+                cfg.mqtt_port = atoi(colon + 1);
+            } else {
+                strncpy(cfg.mqtt_host, mqtt_server_buf, sizeof(cfg.mqtt_host) - 1);
+                cfg.mqtt_port = 1883; // 默认端口
+            }
+
+            strncpy(cfg.username, username_buf, sizeof(cfg.username) - 1);
+            strncpy(cfg.password_mqtt, password_buf, sizeof(cfg.password_mqtt) - 1);
+
+            // 构造完整 URL: mqtt://ip:port (MQTT Client库会自动处理用户名密码，不需要拼在URL里，但在配置结构体里拼一下也没事)
+            snprintf(cfg.full_url, sizeof(cfg.full_url), "mqtt://%s:%d", cfg.mqtt_host, cfg.mqtt_port);
+
+            app_storage_save_net_config(&cfg);
+            ESP_LOGI(TAG, "Config Saved. Restarting MQTT...");
+
+            // * 关键修改 *
+            // 1. 这里不要立即回复 statusMQTT:0
+            // 2. 而是重启 MQTT 客户端
+            mqtt_manager_start(); 
             
-            
-            // TODO: 通知 main 任务重启 MQTT 客户端 (可以用 EventGroup 或 简单的 esp_restart())
-            // esp_restart(); // 简单粗暴生效配置
+            // 3. 等待 mqtt_manager 在连接并 Init 成功后，
+            //    自动回调 blufi_send_mqtt_status(0)
         }
 
         json_parse_end(&jctx);

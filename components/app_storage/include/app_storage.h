@@ -14,10 +14,10 @@ typedef struct {
     // 新增 MQTT 配置字段
     char mqtt_host[64];   // 例如 "iot.example.com"
     int  mqtt_port;       // 例如 1883
-    char mqtt_token[64];  // 例如 "abcdefg" (可能用于 username 或 clientID)
-    
+    char username[64];      // MQTT 用户名
+    char password_mqtt[64]; // MQTT 密码
     // 兼容字段
-    char url[128];        // 完整 URL, 由 host+port 拼接: "mqtt://host:port"
+    char full_url[128];        // 完整 URL, 由 host+port 拼接: "mqtt://host:port"
 } net_config_t;
 
 typedef struct {

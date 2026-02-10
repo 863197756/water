@@ -4,8 +4,14 @@
 #include "esp_log.h"
 #include <string.h>
 #include <stdlib.h>
+#include "esp_mac.h"
 
 static const char *TAG = "PROTO";
+
+
+
+
+
 
 // ==========================================
 // 1. 打包 (使用 cJSON)
@@ -74,4 +80,46 @@ esp_err_t protocol_parse_cmd(const char *json_str, int len, server_cmd_t *out_cm
 
     json_parse_end(&jctx);
     return ESP_OK;
+}
+
+
+
+
+// 获取设备唯一ID (去除冒号的 MAC，或者您自定义的逻辑)
+void protocol_get_device_id(char *out_id) {
+    uint8_t mac[6];
+    esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    // 生成格式: 860103a161850017 (此处示例使用 MAC Hex，实际请按需调整)
+    // 假设使用 MAC 地址的 Hex 字符串作为 ID
+    snprintf(out_id, 17, "%02x%02x%02x%02x%02x%02x", 
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+}
+
+void protocol_get_mac_str(char *out_mac) {
+    uint8_t mac[6];
+    esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    snprintf(out_mac, 18, "%02x:%02x:%02x:%02x:%02x:%02x",
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+}
+
+// 生成 Init 发布包
+char* protocol_pack_init_data(void) {
+    cJSON *root = cJSON_CreateObject();
+    cJSON *data = cJSON_CreateObject();
+
+    char dev_id[32];
+    char mac_str[32];
+    protocol_get_device_id(dev_id);
+    protocol_get_mac_str(mac_str);
+
+    cJSON_AddStringToObject(data, "DeviceID", dev_id);
+    cJSON_AddStringToObject(data, "MACADDR", mac_str);
+    cJSON_AddStringToObject(data, "version", "yincheng_iot_V3.1.1");
+    cJSON_AddStringToObject(data, "communication type", "WiFi 2.4G");
+
+    cJSON_AddItemToObject(root, "data", data);
+
+    char *json_str = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    return json_str;
 }

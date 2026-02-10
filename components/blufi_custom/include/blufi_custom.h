@@ -32,6 +32,10 @@ void blufi_send_custom_result(bool success, const char* msg);
 // max_len: buffer 大小
 esp_err_t load_net_config(int *mode, char *url, size_t max_len);
 
+
+void blufi_send_mqtt_status(int status);
+
+
 #ifdef __cplusplus
 }
 #endif
