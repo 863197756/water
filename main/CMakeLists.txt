@@ -7,12 +7,17 @@ idf_component_register(
     
     PRIV_REQUIRES 
         nvs_flash
+        esp_event
+        driver
+        esp_wifi
+
         app_storage
         blufi_custom 
         net_manager
         mqtt_manager
-        protocol
         time_manager
+        
+        protocol
         bsp_driver 
         modem_4g 
 )

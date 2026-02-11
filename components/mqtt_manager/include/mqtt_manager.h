@@ -1,6 +1,7 @@
 #pragma once
 #include "esp_err.h"
 #include <stdbool.h>
+#include "protocol.h"
 
 /**
  * @brief 初始化 MQTT (读取配置并配置客户端，但暂不连接)
@@ -17,15 +18,9 @@ void mqtt_manager_start(void);
  */
 void mqtt_manager_stop(void);
 
-/**
- * @brief 发布消息
- * @param topic 主题 (如果传 NULL，默认发到上报主题)
- * @param payload 数据内容 JSON
- * @return esp_err_t
- */
-esp_err_t mqtt_manager_publish(const char *topic, const char *payload);
+esp_err_t mqtt_manager_publish_status(const status_report_t *data);
 
-/**
- * @brief 检查 MQTT 是否已连接
- */
-bool mqtt_manager_is_connected(void);
+esp_err_t mqtt_manager_publish_log(const log_report_t *data);
+
+esp_err_t mqtt_manager_publish_alert(const alert_report_t *data);
+esp_err_t mqtt_manager_publish(const char *topic, const char *payload);

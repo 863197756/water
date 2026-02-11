@@ -10,7 +10,7 @@
 static const char *TAG = "STORAGE";
 
 // 定义不同的 Namespace，防止 Key 冲突
-#define NS_NET_CFG   "net_cfg"
+
 #define NS_DEV_STAT  "dev_stat"
 #define NS_ACTION_LOG "act_log"
 
@@ -28,13 +28,13 @@ esp_err_t app_storage_save_net_config(const net_config_t *cfg) {
     nvs_handle_t handle;
     esp_err_t err;
     
-    err = nvs_open(NS_NET_CFG, NVS_READWRITE, &handle);
+    err = nvs_open(NET_CONFIG_NAMESPACE, NVS_READWRITE, &handle);
     if (err != ESP_OK) return err;
 
     err = nvs_set_blob(handle, NET_CONFIG_KEY, cfg, sizeof(net_config_t));
     if (err == ESP_OK) {
         err = nvs_commit(handle);
-        ESP_LOGI(TAG, "Config saved to NVS. Mode: %d, SSID: %s", cfg->mode, cfg->ssid);
+        ESP_LOGI(TAG, "Config saved to NVS. Mode: %s", (cfg->mode == 1) ? "4G" : "WiFi");
     }
     nvs_close(handle);
     return err;
@@ -49,7 +49,7 @@ esp_err_t app_storage_load_net_config(net_config_t *cfg) {
     err = nvs_get_blob(my_handle, NET_CONFIG_KEY, cfg, &required_size);
     
     if (err == ESP_OK) {
-        ESP_LOGI(TAG, "Config loaded. Mode: %d, MQTT: %s", cfg->mode, cfg->url);
+        ESP_LOGI(TAG, "Config loaded. Mode: %d, MQTT: %s", cfg->mode, cfg->full_url );
     } else {
         ESP_LOGW(TAG, "No config found in NVS");
     }
@@ -118,7 +118,7 @@ esp_err_t app_storage_erase(reset_level_t level) {
     // 1. Level 1: 网络重置 (最常用)
     if (level >= RESET_LEVEL_NET) {
         // A. 清除自定义的网络配置 (Mode, URL)
-        erase_namespace(NS_NET_CFG);
+        erase_namespace(NET_CONFIG_NAMESPACE);
         
         // B. 清除 ESP32 底层存储的 Wi-Fi SSID/密码
         // 注意：这会把 esp_wifi_set_config 存的数据清掉

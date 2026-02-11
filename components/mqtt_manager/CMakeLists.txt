@@ -1,10 +1,12 @@
 idf_component_register(
-    SRCS "mqtt_manager.c"
+    SRCS "src/mqtt_manager.c"
     INCLUDE_DIRS "include"
-    PRIV_REQUIRES 
-        mqtt
-        esp_log
-        app_storage
+    REQUIRES 
         protocol
+    PRIV_REQUIRES 
+        mqtt  #esp官方MQTT库
+        esp_event
+        esp_netif
+        app_storage
         blufi_custom
 )

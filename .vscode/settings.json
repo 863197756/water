@@ -15,5 +15,6 @@
     "--background-index",
     "--query-driver=**",
     "--compile-commands-dir=/Users/cxxx/Develop/CodeProject/water/build"
-  ]
+  ],
+  "idf.currentSetup": "/Users/cxxx/Tools/esp-idf/v5.5.2/esp-idf"
 }

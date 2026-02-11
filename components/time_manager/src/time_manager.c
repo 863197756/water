@@ -22,26 +22,21 @@ static void time_sync_notification_cb(struct timeval *tv) {
 
 void time_manager_init(void) {
     ESP_LOGI(TAG, "Initializing SNTP");
-    
-    // 1. 设置 SNTP 工作模式为轮询
-    sntp_setoperatingmode(SNTP_OPMODE_POLL);
+// 1. 设置 SNTP 工作模式
+    esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
     
     // 2. 设置 NTP 服务器
-    // 优先级 0: 阿里云 NTP (国内最快)
-    sntp_setservername(0, "ntp.aliyun.com"); 
-    // 优先级 1: 腾讯云 NTP
-    sntp_setservername(1, "ntp.tencent.com");
-    // 优先级 2: 全球 NTP 池
-    sntp_setservername(2, "pool.ntp.org");
+    esp_sntp_setservername(0, "ntp.aliyun.com"); 
+    esp_sntp_setservername(1, "ntp.tencent.com");
+    esp_sntp_setservername(2, "pool.ntp.org");
 
     // 3. 设置同步回调
-    sntp_set_time_sync_notification_cb(time_sync_notification_cb);
+    esp_sntp_set_time_sync_notification_cb(time_sync_notification_cb);
     
     // 4. 初始化 SNTP 模块
-    sntp_init();
+    esp_sntp_init();
 
-    // 5. 设置时区为中国标准时间 (UTC+8)
-    // CST-8: CST 是时区名，-8 表示比 UTC 快 8 小时 (POSIX 格式比较反直觉，东八区写负数)
+    // 5. 设置时区 (保持不变)
     setenv("TZ", "CST-8", 1);
     tzset();
     

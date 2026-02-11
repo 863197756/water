@@ -13,6 +13,7 @@
 #include "esp_blufi.h"
 #include "blufi_custom.h"
 #include "mqtt_manager.h"
+#include "net_manager.h" // 需要引用 net_manager 来切换模式
 
 
 #if CONFIG_BT_CONTROLLER_ENABLED || !CONFIG_BT_NIMBLE_ENABLED
@@ -105,7 +106,7 @@ static void handle_custom_data(uint8_t *data, int len) {
     jparse_ctx_t jctx;
     if (json_parse_start(&jctx, json_str, len) == 0) {
         int val = 0;
-        char str_buf[128] = {0};
+      
         
         // 1. statusBLE (握手/关闭)
         if (json_obj_get_int(&jctx, "statusBLE", &val) == 0) {
@@ -130,10 +131,15 @@ static void handle_custom_data(uint8_t *data, int len) {
             
             // 返回确认
             send_json_status("statusNet", 1);
+            // 【修正 3】如果是 4G 模式，立即启动 4G 网络，确保 Step 4 能连上
+        if (val == 1) {
+            ESP_LOGI(TAG, "User selected 4G. Switching network now...");
+            net_manager_set_mode(1); // 需在 net_manager 实现此函数
+        }
         }
 
         // 4. MQTT 配置
-        har mqtt_server_buf[64] = {0};
+        char mqtt_server_buf[64] = {0};
         char username_buf[64] = {0};
         char password_buf[64] = {0};
 
