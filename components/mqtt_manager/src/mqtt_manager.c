@@ -66,7 +66,7 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
             if (app_storage_load_net_config(&cfg) != ESP_OK) { cfg.mode = 0; }
             init_data_t init_d = {
                 .fw_version = "1.0.0",
-                .hw_version = "2.0",
+                .hw_version = "1.0",
                 .net_mode = {0}
             };
             if (cfg.mode == 1) strncpy(init_d.net_mode, "4G", sizeof(init_d.net_mode) - 1);
@@ -76,7 +76,7 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
             char *json = protocol_pack_init(&init_d);
             if (json) {
                 ESP_LOGI(TAG, "Sending Init: %s", json);
-                s_init_msg_id = esp_mqtt_client_publish(s_client, s_topic_init, json, 0, 1, 0);
+                s_init_msg_id = esp_mqtt_client_publish(s_client, s_topic_init, json, 0, 2, 0);
                 free(json);
                 s_waiting_for_plan = true;
             }

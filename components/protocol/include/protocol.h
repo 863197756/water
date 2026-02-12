@@ -59,21 +59,28 @@ typedef struct {
     } param;
 } server_cmd_t;
 
-// 状态上报 (Status) - 主要是套餐和滤芯
+// 状态上报 (Status) - 主要是tds、流量、套餐
 typedef struct {
-    int switch_status;
-    int pay_mode;
-    int days;
-    int capacity;
-    int filter[5]; // 5级滤芯
+    // --- 根节点字段 ---
+    int tds_in;          // tdsIn
+    int tds_out;         // tdsOut
+    int tds_backup;      // tdsBackup
+    int total_water;     // totalWater (累计用水量)
+
+    // --- param 对象字段 ---
+    int switch_status;   // param.switch
+    int pay_mode;        // param.payMode
+    int days;            // param.days
+    int capacity;        // param.capacity
+    int filter[5];       // param.filter01 - 05
 } status_report_t;
 
 // 日志上报 (Log) - 主要是制水数据
 typedef struct {
-    int production_info; // 本次制水量
-    int tds_raw;         // 原水 TDS
-    int tds_pure;        // 净水 TDS
-    int total_water;     // 累计用水量
+    int production_vol;  // productionVol (本次制水量)
+    int tds_in;          // tdsIn
+    int tds_out;         // tdsOut
+    int tds_backup;      // tdsBackup
 } log_report_t;
 
 // 报警上报 (Alert)

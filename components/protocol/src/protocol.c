@@ -47,16 +47,13 @@ char* protocol_pack_init(const init_data_t *data) {
     cJSON *root = cJSON_CreateObject();
     
     char uid[32];
-    char dev_id[32];
     protocol_get_uid(uid, sizeof(uid));
-    protocol_get_device_id(dev_id, sizeof(dev_id));
+    
 
     cJSON_AddStringToObject(root, "uid", uid);           // eFuse UID
-    cJSON_AddStringToObject(root, "deviceId", dev_id);   // Topic 用的 ID
-    cJSON_AddStringToObject(root, "mac", data->mac_str); // 格式化 MAC
-    
     cJSON_AddStringToObject(root, "fwVersion", data->fw_version);
     cJSON_AddStringToObject(root, "hwVersion", data->hw_version);
+    cJSON_AddStringToObject(root, "mac", data->mac_str); // 格式化 MAC
     cJSON_AddStringToObject(root, "netMode", data->net_mode); // "WIFI" or "4G"
     cJSON_AddNumberToObject(root, "timestamp", (double)get_timestamp_ms());
 
@@ -70,12 +67,18 @@ char* protocol_pack_status(const status_report_t *data) {
     cJSON *root = cJSON_CreateObject();
     
     // 参数对象
+    // 1. 根节点字段
+    cJSON_AddNumberToObject(root, "tdsIn", data->tds_in);
+    cJSON_AddNumberToObject(root, "tdsOut", data->tds_out);
+    cJSON_AddNumberToObject(root, "tdsBackup", data->tds_backup);
+    cJSON_AddNumberToObject(root, "totalWater", data->total_water);
+
+    // 2. param 对象
     cJSON *param = cJSON_CreateObject();
     cJSON_AddNumberToObject(param, "switch", data->switch_status);
     cJSON_AddNumberToObject(param, "payMode", data->pay_mode);
     cJSON_AddNumberToObject(param, "days", data->days);
     cJSON_AddNumberToObject(param, "capacity", data->capacity);
-    
     // 滤芯 01-05
     char key[16];
     for(int i=0; i<5; i++) {
@@ -84,7 +87,7 @@ char* protocol_pack_status(const status_report_t *data) {
     }
     
     cJSON_AddItemToObject(root, "param", param);
-    cJSON_AddNumberToObject(root, "timestamp", (double)get_timestamp_ms());
+    // cJSON_AddNumberToObject(root, "timestamp", (double)get_timestamp_ms());
 
     char *str = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
@@ -96,11 +99,10 @@ char* protocol_pack_log(const log_report_t *data) {
     cJSON *root = cJSON_CreateObject();
 
     cJSON_AddNumberToObject(root, "timestamp", (double)get_timestamp_ms());
-    cJSON_AddNumberToObject(root, "productionVol", data->production_info);
-    cJSON_AddNumberToObject(root, "totalWater", data->total_water);
-    cJSON_AddNumberToObject(root, "tdsIn", data->tds_raw);
-    cJSON_AddNumberToObject(root, "tdsOut", data->tds_pure);
-    cJSON_AddNumberToObject(root, "tdsBackup", 12);
+    cJSON_AddNumberToObject(root, "productionVol", data->production_vol);
+    cJSON_AddNumberToObject(root, "tdsIn", data->tds_in);
+    cJSON_AddNumberToObject(root, "tdsOut", data->tds_out);
+    cJSON_AddNumberToObject(root, "tdsBackup", data->tds_backup);
 
 
 

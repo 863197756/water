@@ -80,6 +80,7 @@ void app_logic_making_water_tick(void) {
 static int get_tds_raw(void) { return 148; }  // 模拟原水 TDS
 static int get_tds_pure(void) { return 12; }  // 模拟净水 TDS
 static int get_total_water(void) { return 12345; } // 模拟累计流量
+static int get_tds_backup(void) { return 10; }
 
 // --- 【新增】定时上报任务 ---
 static void app_logic_report_task(void *pvParameters) {
@@ -91,10 +92,10 @@ static void app_logic_report_task(void *pvParameters) {
 
         // 2. 准备 Log 数据 (制水信息)
         log_report_t log_data = {
-            .production_info = 100,
-            .tds_raw = get_tds_raw(),
-            .tds_pure = get_tds_pure(),
-            .total_water = get_total_water(),
+            .production_vol = 150,        // 本次制水量 (ml)
+            .tds_in = get_tds_raw(),
+            .tds_out = get_tds_pure(),
+            .tds_backup = get_tds_backup(),
         };
 
 
@@ -108,13 +109,20 @@ static void app_logic_report_task(void *pvParameters) {
 
         // // 4. (可选) 顺便上报 Status (状态信息: 滤芯、套餐)
         // status_report_t status_data = {
-        //     .switch_status = 1,
-        //     .pay_mode = 0,       // 0:计时
-        //     .days = 365,         // 剩余天数
+        //     // 根节点数据
+        //     .tds_in = get_tds_raw(),
+        //     .tds_out = get_tds_pure(),
+        //     .tds_backup = get_tds_backup(),
+        //     .total_water = get_total_water(), // 累计流量
+            
+        //     // Param 数据
+        //     .switch_status = 1, // 开机
+        //     .pay_mode = 0,      // 计时
+        //     .days = 365,
         //     .capacity = 0,
-        //     .filter = {180, 180, 180, 360, 360} // 滤芯寿命
+        //     .filter = {100, 100, 100, 365, 180} // 示例寿命
         // };
-        // mqtt_manager_publish_status(&status_data); 
+        // mqtt_manager_publish_status(&status_data);
     }
 }
 
