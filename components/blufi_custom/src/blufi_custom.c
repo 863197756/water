@@ -40,6 +40,7 @@
 #include "app_storage.h"
 
 static const char *TAG = "BLUFI";
+static bool s_ble_is_connected = false; // 记录蓝牙连接状态
 
 static wifi_config_t sta_config;
 static bool gl_sta_connected = false;
@@ -83,6 +84,10 @@ static void on_app_event(void *arg, esp_event_base_t event_base,
 }
 
 static void send_json_status(const char *key, int value) {
+    if (!s_ble_is_connected) {
+        ESP_LOGD(TAG, "No BLE connection, skip sending: %s=%d", key, value);
+        return;
+    }
     char payload[64];
     int len = snprintf(payload, sizeof(payload), "{\"%s\":%d}", key, value);
     esp_blufi_send_custom_data((uint8_t *)payload, len);
@@ -204,11 +209,13 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t e
         // 1. 报告失败给 App
         send_json_status("statusWiFi", 2); 
         
+
         // 2. 使用 Blufi 标准报告失败信息 (可以带上具体的 Reason)
-        esp_blufi_extra_info_t info = {0};
-        // 这里的 reason 可以让手机 App 知道是密码错还是找不到 SSID
-        esp_blufi_send_wifi_conn_report(WIFI_MODE_STA, ESP_BLUFI_STA_CONN_FAIL, event->reason, &info);
-        
+        if (s_ble_is_connected) {
+            esp_blufi_extra_info_t info = {0};
+            // 这里的 reason 可以让手机 App 知道是密码错还是找不到 SSID
+            esp_blufi_send_wifi_conn_report(WIFI_MODE_STA, ESP_BLUFI_STA_CONN_FAIL, event->reason, &info);
+        }
         // 3. 策略性重连（避免密码错误时的无限死循环）
         if (event->reason != WIFI_REASON_AUTH_FAIL) {
             esp_wifi_connect();
@@ -252,10 +259,12 @@ static void example_event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_para
         break;
     case ESP_BLUFI_EVENT_BLE_CONNECT:
         BLUFI_INFO("蓝牙已连接");
+        s_ble_is_connected = true;
         blufi_security_init();
         break;
     case ESP_BLUFI_EVENT_BLE_DISCONNECT:
         BLUFI_INFO("蓝牙已断开");
+        s_ble_is_connected = false;
         blufi_security_deinit();
         esp_blufi_adv_start(); 
         break;
