@@ -140,3 +140,29 @@ esp_err_t app_storage_erase(reset_level_t level) {
 
     return ESP_OK;
 }
+
+
+
+
+esp_err_t app_storage_set_pending_init(uint8_t val) {
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(NET_CONFIG_NAMESPACE, NVS_READWRITE, &handle);
+    if (err != ESP_OK) return err;
+    
+    err = nvs_set_u8(handle, "pending_init", val);
+    if (err == ESP_OK) {
+        err = nvs_commit(handle);
+    }
+    nvs_close(handle);
+    return err;
+}
+
+uint8_t app_storage_get_pending_init(void) {
+    nvs_handle_t handle;
+    uint8_t val = 0; // 默认不发
+    if (nvs_open(NET_CONFIG_NAMESPACE, NVS_READONLY, &handle) == ESP_OK) {
+        nvs_get_u8(handle, "pending_init", &val);
+        nvs_close(handle);
+    }
+    return val;
+}

@@ -61,3 +61,17 @@ esp_err_t app_storage_log_action(const char *action);
  * @return esp_err_t
  */
 esp_err_t app_storage_erase(reset_level_t level);
+
+
+
+/**
+ * @brief 设置是否需要发送 Init 包 (1=需要, 0=不需要)
+ * 存入 NVS，掉电不丢失
+ */
+esp_err_t app_storage_set_pending_init(uint8_t val);
+
+/**
+ * @brief 获取是否需要发送 Init 包
+ * @return 1=需要, 0=不需要 (默认)
+ */
+uint8_t app_storage_get_pending_init(void);

@@ -174,6 +174,11 @@ static void handle_custom_data(uint8_t *data, int len) {
             // 构造完整 URL: mqtt://ip:port
             snprintf(cfg.full_url, sizeof(cfg.full_url), "mqtt://%s:%d", cfg.mqtt_host, cfg.mqtt_port);
 
+
+            // 标记：下次连接 MQTT 时需要发送 Init 包
+            app_storage_set_pending_init(1);
+            ESP_LOGI(TAG, "Config Saved. Flag 'pending_init' set to 1.");
+
             app_storage_save_net_config(&cfg);
             ESP_LOGI(TAG, "Config Saved. Posting MQTT config update event...");
             app_events_post_mqtt_config_updated();
@@ -277,6 +282,26 @@ static void example_event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_para
     case ESP_BLUFI_EVENT_REQ_CONNECT_TO_AP:
         
         BLUFI_INFO("收到连接请求，开始连接 Wi-Fi");
+        // 将 Blufi 收到的临时配置保存到我们的持久化结构体中
+        net_config_t save_cfg;
+        // 1. 先读取现有配置（防止覆盖掉 MQTT 地址）
+        if (app_storage_load_net_config(&save_cfg) != ESP_OK) {
+            memset(&save_cfg, 0, sizeof(net_config_t));
+        }
+        
+        // 2. 更新 SSID 和 密码
+        // 注意：sta_config 是 static 变量，在前面 RECV_SSID/PASSWD 事件中已被赋值
+        strncpy(save_cfg.ssid, (char *)sta_config.sta.ssid, sizeof(save_cfg.ssid) - 1);
+        strncpy(save_cfg.password, (char *)sta_config.sta.password, sizeof(save_cfg.password) - 1);
+        save_cfg.mode = 0; // 强制标记为 WiFi 模式
+
+        // 3. 保存到 NVS
+        esp_err_t save_err = app_storage_save_net_config(&save_cfg);
+        if (save_err == ESP_OK) {
+            BLUFI_INFO("Wi-Fi 配置已保存到 NVS");
+        } else {
+            BLUFI_ERROR("Wi-Fi 配置保存失败: %s", esp_err_to_name(save_err));
+        }
         esp_wifi_disconnect();
         esp_wifi_set_config(WIFI_IF_STA, &sta_config);
         esp_wifi_start();

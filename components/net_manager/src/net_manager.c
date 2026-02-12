@@ -2,6 +2,7 @@
 #include <string.h>
 #include "esp_log.h"
 #include "esp_event.h"
+#include "esp_netif.h"
 #include "esp_wifi.h"
 #include "net_manager.h"
 #include "app_events.h"
@@ -21,29 +22,20 @@ static void net_event_handler(void* arg, esp_event_base_t event_base,
     // 处理 Wi-Fi 获取到 IP 的事件 (说明连网成功了)
     if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ESP_LOGI(TAG, "Wi-Fi Got IP! 网络已就绪,IP事件已广播");
-        
-        // 网络通了，启动 MQTT 客户端
-        // mqtt_manager_start();
-    }// 情况 B: 4G (PPP) 连上了
+        app_events_post_net_ready(APP_NET_TYPE_WIFI);
+    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        ESP_LOGW(TAG, "Wi-Fi disconnected");
+        app_events_post_net_lost(APP_NET_TYPE_WIFI);
+    }
+    // 情况 B: 4G (PPP) 连上了
     else if (event_base == IP_EVENT && event_id == IP_EVENT_PPP_GOT_IP) {
         ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
         ESP_LOGI(TAG, "4G PPP Got IP: " IPSTR, IP2STR(&event->ip_info.ip));
-        
-        // MQTT Manager 会监听 IP_EVENT_STA_GOT_IP / IP_EVENT_PPP_GOT_IP 并自动启动。
+        app_events_post_net_ready(APP_NET_TYPE_PPP);
+    } else if (event_base == IP_EVENT && event_id == IP_EVENT_PPP_LOST_IP) {
+        ESP_LOGW(TAG, "4G PPP lost IP");
+        app_events_post_net_lost(APP_NET_TYPE_PPP);
     }
-    
-    // 将来在这里处理 4G 的 IP_EVENT_PPP_GOT_IP 事件
-}
-
-static void on_app_event(void *arg, esp_event_base_t event_base,
-                         int32_t event_id, void *event_data)
-{
-    if (event_base != APP_EVENTS || event_id != APP_EVENT_NET_MODE_REQUEST || !event_data) {
-        return;
-    }
-
-    const app_event_net_mode_t *req = (const app_event_net_mode_t *)event_data;
-    net_manager_set_mode(req->mode);
 }
 
 
@@ -56,8 +48,10 @@ void net_manager_init(void) {
     // 注册 4G 事件监听 (IP_EVENT_PPP_GOT_IP)
     ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_PPP_GOT_IP,
                                                         net_event_handler, NULL, NULL));
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(APP_EVENTS, APP_EVENT_NET_MODE_REQUEST,
-                                                        on_app_event, NULL, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_PPP_LOST_IP,
+                                                        net_event_handler, NULL, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED,
+                                                        net_event_handler, NULL, NULL));
 
 
 
@@ -76,6 +70,13 @@ void net_manager_init(void) {
     
     // 4. 判断配置是否有效
     bool has_valid_config = (err == ESP_OK) && (strlen(net_cfg.full_url) > 5);
+
+    if (has_valid_config && net_cfg.mode == 0) {
+    if (strlen(net_cfg.ssid) < 1) {
+        has_valid_config = false;
+        ESP_LOGW(TAG, "检测到 MQTT 配置，但缺少 SSID，视为无效配置，等待配网...");
+    }
+}
 
     if (has_valid_config) {
         ESP_LOGI(TAG, "读取到有效配置 -> Mode: %d (0:WiFi, 1:4G), URL: %s", net_cfg.mode, net_cfg.full_url);

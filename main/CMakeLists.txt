@@ -13,6 +13,7 @@ idf_component_register(
 
         app_storage
         blufi_custom 
+        app_fsm
         net_manager
         mqtt_manager
         time_manager

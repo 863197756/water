@@ -16,6 +16,7 @@
 #include "net_manager.h"
 #include "app_logic.h"
 #include "mqtt_manager.h"
+#include "app_fsm.h"
 
 
 // 未实现的组件
@@ -47,11 +48,15 @@ void app_main(void)
     // 网络基础设施初始化
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
- 
-    //启动 Blufi (蓝牙配网)
+
+    // 启动连接状态机（统一编排网络 / MQTT 生命周期）
+    app_fsm_init();
+
+    // 启动 Blufi (蓝牙配网)
     // 即使有网也启动，方便随时重新配置。内部会自动处理蓝牙协议栈初始化。
     ESP_ERROR_CHECK(blufi_custom_init());
-
+    // MQTT 管理器由状态机按事件触发 Start/Stop
+    mqtt_manager_init();
     // 3. 启动网络管理器
     // 它会读取 NVS，尝试连接 WiFi 或 4G。
     // 如果 NVS 为空，它会待机，等待 Blufi 配网写入配置。
@@ -62,8 +67,7 @@ void app_main(void)
     app_logic_init();
     
     
-    // MQTT 管理器不需要显式 Start，它会在 net_manager 连网成功回调中自动 Start
-    mqtt_manager_init();
+ 
 
 
 

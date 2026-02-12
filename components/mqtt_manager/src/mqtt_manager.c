@@ -1,5 +1,6 @@
 #include "mqtt_manager.h"
 #include "mqtt_client.h"
+#include <string.h>
 #include "esp_log.h"
 #include "app_storage.h"
 #include "protocol.h"
@@ -57,43 +58,42 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
         // 订阅指令
         esp_mqtt_client_subscribe(s_client, s_topic_cmd, 1);
         
-        net_config_t cfg;
-        // 如果读取失败，默认 mode=0 (WiFi)
-        if (app_storage_load_net_config(&cfg) != ESP_OK) {
-            cfg.mode = 0; 
-        }
-        
-        // 【修正】初始化结构体，net_mode 留空或全0
-        init_data_t init_d = {
-            .fw_version = "1.0.0",
-            .hw_version = "2.0",
-            .net_mode = {0} // 先清零
-        };
+        if (app_storage_get_pending_init() == 1) {
+            ESP_LOGI(TAG, "Pending Init flag is 1, sending Init packet...");
 
-        // 【修正】使用 strcpy 手动赋值字符串到数组
-        if (cfg.mode == 1) {
-            strncpy(init_d.net_mode, "4G", sizeof(init_d.net_mode) - 1);
+            // ... (这里是原有的构建 init_d 代码) ...
+            net_config_t cfg;
+            if (app_storage_load_net_config(&cfg) != ESP_OK) { cfg.mode = 0; }
+            init_data_t init_d = {
+                .fw_version = "1.0.0",
+                .hw_version = "2.0",
+                .net_mode = {0}
+            };
+            if (cfg.mode == 1) strncpy(init_d.net_mode, "4G", sizeof(init_d.net_mode) - 1);
+            else strncpy(init_d.net_mode, "WIFI", sizeof(init_d.net_mode) - 1);
+            protocol_get_mac_str(init_d.mac_str, sizeof(init_d.mac_str));
+
+            char *json = protocol_pack_init(&init_d);
+            if (json) {
+                ESP_LOGI(TAG, "Sending Init: %s", json);
+                s_init_msg_id = esp_mqtt_client_publish(s_client, s_topic_init, json, 0, 1, 0);
+                free(json);
+                s_waiting_for_plan = true;
+            }
         } else {
-            strncpy(init_d.net_mode, "WIFI", sizeof(init_d.net_mode) - 1);
+            ESP_LOGI(TAG, "Pending Init flag is 0. Skip sending Init.");
+            // 如果不需要发 Init，也不用等待套餐下发，直接可以开始工作（或者主动查一下状态）
+            // s_waiting_for_plan = false; 
         }
-
-        // 获取 MAC
-        protocol_get_mac_str(init_d.mac_str, sizeof(init_d.mac_str));
-
-        char *json = protocol_pack_init(&init_d);
-        if (json) {
-            ESP_LOGI(TAG, "Sending Init: %s", json);
-            s_init_msg_id = esp_mqtt_client_publish(s_client, s_topic_init, json, 0, 1, 0);
-            free(json);
-            
-            // 标记等待套餐下发
-            s_waiting_for_plan = true;
-        }
+        app_events_post_mqtt_connected();
         break;
         
     case MQTT_EVENT_PUBLISHED:
         if (event->msg_id == s_init_msg_id) {
             ESP_LOGI(TAG, "Init Published. Waiting for Cloud CMD (Plan Info)...");
+            // 发送成功，清除标志位 (下次重启就不发了)
+            app_storage_set_pending_init(0);
+            ESP_LOGI(TAG, "Flag 'pending_init' cleared to 0.");
             s_init_msg_id = -1;
         }
         break;
@@ -118,6 +118,10 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
     case MQTT_EVENT_ERROR:
         ESP_LOGE(TAG, "MQTT Error");
         // 可选：如果断开，可通过独立钩子通知上层状态
+        break;
+    case MQTT_EVENT_DISCONNECTED:
+        ESP_LOGW(TAG, "MQTT Disconnected");
+        app_events_post_mqtt_disconnected();
         break;
         
     default: break;
@@ -169,35 +173,8 @@ esp_err_t mqtt_manager_publish(const char *topic, const char *payload) {
     return (msg_id >= 0) ? ESP_OK : ESP_FAIL;
 }
 
-//IP 事件回调：网络通了，我再启动
-static void on_network_ip_event(void* arg, esp_event_base_t event_base,
-                                int32_t event_id, void* event_data) {
-    ESP_LOGI(TAG, "检测到网络 IP 事件，正在启动 MQTT...");
-    mqtt_manager_start();
-}
-
-static void on_app_event(void* arg, esp_event_base_t event_base,
-                         int32_t event_id, void* event_data) {
-    if (event_base == APP_EVENTS && event_id == APP_EVENT_MQTT_CONFIG_UPDATED) {
-        ESP_LOGI(TAG, "检测到 MQTT 配置更新事件，重启 MQTT...");
-        mqtt_manager_start();
-    }
-}
-
-
 void mqtt_manager_init(void) {
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
-                                                        on_network_ip_event, NULL, NULL));
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_PPP_GOT_IP,
-                                                        on_network_ip_event, NULL, NULL));
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(APP_EVENTS, APP_EVENT_MQTT_CONFIG_UPDATED,
-                                                        on_app_event, NULL, NULL));
-
-
-    ESP_LOGI(TAG, "MQTT Manager 已初始化 (等待网络连接...)");
-    
-    
-    // 可以在这里预生成 ID，或者留到 Connected
+    ESP_LOGI(TAG, "MQTT Manager 已初始化 (由状态机触发启动/停止)");
 }
 
 void mqtt_manager_start(void) {
