@@ -39,7 +39,9 @@ void app_main(void)
     // 存储与系统初始化
     ESP_ERROR_CHECK(app_storage_init());
 
-    app_storage_erase(RESET_LEVEL_NET);
+    // 注意：不要在每次启动时清空网络配置。
+    // 网络/出厂重置应由按键或云端命令触发。
+    // app_storage_erase(RESET_LEVEL_NET);
 
 
     // 网络基础设施初始化

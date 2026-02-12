@@ -4,7 +4,7 @@ idf_component_register(
     PRIV_REQUIRES 
         esp_wifi
         esp_event
+        app_events
         app_storage
-        mqtt_manager
         modem_4g  # 待 4G 模组实现后开启
 )

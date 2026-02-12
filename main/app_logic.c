@@ -87,11 +87,14 @@ static void app_logic_report_task(void *pvParameters) {
 
     while (1) {
         // 1. 等待 60 秒 (根据需求调整时间)
-        vTaskDelay(pdMS_TO_TICKS(10000));
+        vTaskDelay(pdMS_TO_TICKS(60000));
 
         // 2. 准备 Log 数据 (制水信息)
         log_report_t log_data = {
-            .production_info = 100
+            .production_info = 100,
+            .tds_raw = get_tds_raw(),
+            .tds_pure = get_tds_pure(),
+            .total_water = get_total_water(),
         };
 
 

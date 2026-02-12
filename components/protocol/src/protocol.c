@@ -96,7 +96,8 @@ char* protocol_pack_log(const log_report_t *data) {
     cJSON *root = cJSON_CreateObject();
 
     cJSON_AddNumberToObject(root, "timestamp", (double)get_timestamp_ms());
-    cJSON_AddNumberToObject(root, "productionVol", data->total_water); 
+    cJSON_AddNumberToObject(root, "productionVol", data->production_info);
+    cJSON_AddNumberToObject(root, "totalWater", data->total_water);
     cJSON_AddNumberToObject(root, "tdsIn", data->tds_raw);
     cJSON_AddNumberToObject(root, "tdsOut", data->tds_pure);
     cJSON_AddNumberToObject(root, "tdsBackup", 12);

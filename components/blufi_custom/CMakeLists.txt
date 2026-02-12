@@ -13,8 +13,6 @@ idf_component_register(
         json_parser 
         esp_timer
         app_storage
-        mqtt_manager
-        net_manager
+        app_events
 )
-
 

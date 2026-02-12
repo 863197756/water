@@ -4,17 +4,13 @@
 #include "app_storage.h"
 #include "protocol.h"
 
-#include "blufi_custom.h" // 需要引用 blufi 来发送状态
+#include "app_events.h"
 #include "esp_event.h"
 #include "esp_netif.h"
 
 static const char *TAG = "MQTT_MGR";
 static esp_mqtt_client_handle_t s_client = NULL;
 static bool s_waiting_for_plan = false; // 新增：等待套餐下发标志
-
-// 动态 Topic
-static char s_topic_cmd[64];  // 订阅: iot_purifier/{ID}/cmd
-static char s_topic_init[64]; // 发布: iot_purifier/init
 
 // 记录 Init 消息的 msg_id，用于确认发送完成
 static int s_init_msg_id = -1;
@@ -109,7 +105,7 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
             if (protocol_parse_cmd(event->data, event->data_len, &cmd) == ESP_OK) {
                 if (s_waiting_for_plan) {
                     ESP_LOGI(TAG, "Received CMD (Plan Info). Step 4 Complete.");
-                    blufi_send_mqtt_status(0); // 通知蓝牙：MQTT流程成功
+                    app_events_post_mqtt_plan_received();
                     s_waiting_for_plan = false;
                 }
 
@@ -121,8 +117,7 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
         break;
     case MQTT_EVENT_ERROR:
         ESP_LOGE(TAG, "MQTT Error");
-        // 可选：如果断开，发送 statusMQTT: 1
-        // blufi_send_mqtt_status(1);
+        // 可选：如果断开，可通过独立钩子通知上层状态
         break;
         
     default: break;
@@ -181,12 +176,22 @@ static void on_network_ip_event(void* arg, esp_event_base_t event_base,
     mqtt_manager_start();
 }
 
+static void on_app_event(void* arg, esp_event_base_t event_base,
+                         int32_t event_id, void* event_data) {
+    if (event_base == APP_EVENTS && event_id == APP_EVENT_MQTT_CONFIG_UPDATED) {
+        ESP_LOGI(TAG, "检测到 MQTT 配置更新事件，重启 MQTT...");
+        mqtt_manager_start();
+    }
+}
+
 
 void mqtt_manager_init(void) {
     ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
                                                         on_network_ip_event, NULL, NULL));
     ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_PPP_GOT_IP,
                                                         on_network_ip_event, NULL, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(APP_EVENTS, APP_EVENT_MQTT_CONFIG_UPDATED,
+                                                        on_app_event, NULL, NULL));
 
 
     ESP_LOGI(TAG, "MQTT Manager 已初始化 (等待网络连接...)");

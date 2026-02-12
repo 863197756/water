@@ -8,5 +8,5 @@ idf_component_register(
         esp_event
         esp_netif
         app_storage
-        blufi_custom
+        app_events
 )

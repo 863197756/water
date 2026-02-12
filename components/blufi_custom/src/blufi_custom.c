@@ -12,8 +12,7 @@
 #include "esp_blufi_api.h"
 #include "esp_blufi.h"
 #include "blufi_custom.h"
-#include "mqtt_manager.h"
-#include "net_manager.h" // 需要引用 net_manager 来切换模式
+#include "app_events.h"
 
 
 #if CONFIG_BT_CONTROLLER_ENABLED || !CONFIG_BT_NIMBLE_ENABLED
@@ -36,7 +35,6 @@
 #endif
 
 // 引入组件头文件
-#include "blufi_custom.h"
 #include "blufi_custom_priv.h"
 #include "json_parser.h" 
 #include "app_storage.h"
@@ -52,13 +50,6 @@ static bool gl_sta_connected = false;
 extern int esp_blufi_gatt_svr_init(void);
 // 其它回调
 void ble_store_config_init(void);
-
-void blufi_send_mqtt_status(int status) {
-    char payload[64];
-    int len = snprintf(payload, sizeof(payload), "{\"statusMQTT\":%d}", status);
-    esp_blufi_send_custom_data((uint8_t *)payload, len);
-    ESP_LOGI(TAG, "Sent via BLE: %s", payload);
-}
 
 
 static void blufi_on_reset(int reason) {
@@ -76,6 +67,20 @@ static void bleprph_host_task(void *param) {
     nimble_port_freertos_deinit();
 }
 #endif
+
+void blufi_send_mqtt_status(int status) {
+    char payload[64];
+    int len = snprintf(payload, sizeof(payload), "{\"statusMQTT\":%d}", status);
+    esp_blufi_send_custom_data((uint8_t *)payload, len);
+    ESP_LOGI(TAG, "Sent via BLE: %s", payload);
+}
+
+static void on_app_event(void *arg, esp_event_base_t event_base,
+                         int32_t event_id, void *event_data) {
+    if (event_base == APP_EVENTS && event_id == APP_EVENT_MQTT_PLAN_RECEIVED) {
+        blufi_send_mqtt_status(0);
+    }
+}
 
 static void send_json_status(const char *key, int value) {
     char payload[64];
@@ -131,11 +136,8 @@ static void handle_custom_data(uint8_t *data, int len) {
             
             // 返回确认
             send_json_status("statusNet", 1);
-            // 【修正 3】如果是 4G 模式，立即启动 4G 网络，确保 Step 4 能连上
-        if (val == 1) {
-            ESP_LOGI(TAG, "User selected 4G. Switching network now...");
-            net_manager_set_mode(1); // 需在 net_manager 实现此函数
-        }
+            // 通过事件通知网络管理器切换模式
+            app_events_post_net_mode_request(val);
         }
 
         // 4. MQTT 配置
@@ -173,15 +175,8 @@ static void handle_custom_data(uint8_t *data, int len) {
             snprintf(cfg.full_url, sizeof(cfg.full_url), "mqtt://%s:%d", cfg.mqtt_host, cfg.mqtt_port);
 
             app_storage_save_net_config(&cfg);
-            ESP_LOGI(TAG, "Config Saved. Restarting MQTT...");
-
-            // * 关键修改 *
-            // 1. 这里不要立即回复 statusMQTT:0
-            // 2. 而是重启 MQTT 客户端
-            mqtt_manager_start(); 
-            
-            // 3. 等待 mqtt_manager 在连接并 Init 成功后，
-            //    自动回调 blufi_send_mqtt_status(0)
+            ESP_LOGI(TAG, "Config Saved. Posting MQTT config update event...");
+            app_events_post_mqtt_config_updated();
         }
 
         json_parse_end(&jctx);
@@ -320,6 +315,7 @@ esp_err_t blufi_custom_init(void) {
 
     ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &ip_event_handler, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_register(APP_EVENTS, APP_EVENT_MQTT_PLAN_RECEIVED, &on_app_event, NULL));
 
     // 1. 控制器层初始化 (Controller)
 #if CONFIG_BT_CONTROLLER_ENABLED || !CONFIG_BT_NIMBLE_ENABLED

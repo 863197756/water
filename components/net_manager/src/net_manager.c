@@ -1,10 +1,11 @@
 // net_manager.c
+#include <string.h>
 #include "esp_log.h"
 #include "esp_event.h"
 #include "esp_wifi.h"
 #include "net_manager.h"
+#include "app_events.h"
 #include "app_storage.h" // 引用之前定义的存储组件
-#include "mqtt_manager.h"
 
 static const char *TAG = "NET_MGR";
 #include "modem_4g.h" // 你的4G组件头文件
@@ -28,12 +29,21 @@ static void net_event_handler(void* arg, esp_event_base_t event_base,
         ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
         ESP_LOGI(TAG, "4G PPP Got IP: " IPSTR, IP2STR(&event->ip_info.ip));
         
-        // 注意：MQTT Manager 目前只监听了 IP_EVENT_STA_GOT_IP
-        // 你需要去 mqtt_manager.c 里，把 IP_EVENT_PPP_GOT_IP 也加到监听列表里！
-        // 或者，我们可以这里手动触发一个通用事件，但修改 MQTT 监听是最干净的。
+        // MQTT Manager 会监听 IP_EVENT_STA_GOT_IP / IP_EVENT_PPP_GOT_IP 并自动启动。
     }
     
     // 将来在这里处理 4G 的 IP_EVENT_PPP_GOT_IP 事件
+}
+
+static void on_app_event(void *arg, esp_event_base_t event_base,
+                         int32_t event_id, void *event_data)
+{
+    if (event_base != APP_EVENTS || event_id != APP_EVENT_NET_MODE_REQUEST || !event_data) {
+        return;
+    }
+
+    const app_event_net_mode_t *req = (const app_event_net_mode_t *)event_data;
+    net_manager_set_mode(req->mode);
 }
 
 
@@ -46,6 +56,8 @@ void net_manager_init(void) {
     // 注册 4G 事件监听 (IP_EVENT_PPP_GOT_IP)
     ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_PPP_GOT_IP,
                                                         net_event_handler, NULL, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(APP_EVENTS, APP_EVENT_NET_MODE_REQUEST,
+                                                        on_app_event, NULL, NULL));
 
 
 
@@ -110,10 +122,4 @@ void net_manager_set_mode(int mode) {
         modem_4g_stop();
         // WiFi 由 Blufi 或 NVS 启动
     }
-}
-esp_err_t net_manager_send_data(const char *payload) {
-        return mqtt_manager_publish(NULL, payload);
-    
-
-    return ESP_FAIL;
 }
