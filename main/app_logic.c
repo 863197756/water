@@ -87,15 +87,13 @@ static void app_logic_report_task(void *pvParameters) {
 
     while (1) {
         // 1. 等待 60 秒 (根据需求调整时间)
-        vTaskDelay(pdMS_TO_TICKS(60000));
+        vTaskDelay(pdMS_TO_TICKS(10000));
 
         // 2. 准备 Log 数据 (制水信息)
         log_report_t log_data = {
-            .production_info = 100,         // 本次制水量 (可传入实际变量)
-            .tds_raw = get_tds_raw(),       // 原水 TDS
-            .tds_pure = get_tds_pure(),     // 净水 TDS
-            .total_water = get_total_water()// 累计用水量
+            .production_info = 100
         };
+
 
         // 3. 发送 Log 到 MQTT
         ESP_LOGI(TAG, "Uploading Log Data...");

@@ -39,7 +39,7 @@ void app_main(void)
     // 存储与系统初始化
     ESP_ERROR_CHECK(app_storage_init());
 
-    // app_storage_erase(RESET_LEVEL_NET);
+    app_storage_erase(RESET_LEVEL_NET);
 
 
     // 网络基础设施初始化

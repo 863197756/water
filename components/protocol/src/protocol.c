@@ -95,11 +95,14 @@ char* protocol_pack_status(const status_report_t *data) {
 char* protocol_pack_log(const log_report_t *data) {
     cJSON *root = cJSON_CreateObject();
 
-    cJSON_AddNumberToObject(root, "productionInfo", data->production_info);
-    cJSON_AddNumberToObject(root, "InTDS", data->tds_raw);
-    cJSON_AddNumberToObject(root, "OutTDS", data->tds_pure);
-    cJSON_AddNumberToObject(root, "totalWater", data->total_water); // 文档提及
     cJSON_AddNumberToObject(root, "timestamp", (double)get_timestamp_ms());
+    cJSON_AddNumberToObject(root, "productionVol", data->total_water); 
+    cJSON_AddNumberToObject(root, "tdsIn", data->tds_raw);
+    cJSON_AddNumberToObject(root, "tdsOut", data->tds_pure);
+    cJSON_AddNumberToObject(root, "tdsBackup", 12);
+
+
+
 
     char *str = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);

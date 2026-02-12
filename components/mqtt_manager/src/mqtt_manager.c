@@ -43,6 +43,9 @@ static void generate_topics(void) {
 
     ESP_LOGI(TAG, "Init Topic: %s", s_topic_init);
     ESP_LOGI(TAG, "Cmd  Topic: %s", s_topic_cmd);
+    ESP_LOGI(TAG, "Status Topic: %s", s_topic_status);
+    ESP_LOGI(TAG, "Log   Topic: %s", s_topic_log);
+    ESP_LOGI(TAG, "Alert Topic: %s", s_topic_alert);
 }
 
 // MQTT 事件处理
@@ -140,7 +143,7 @@ esp_err_t mqtt_manager_publish_log(const log_report_t *data) {
     if (!s_client) return ESP_FAIL;
     char *json = protocol_pack_log(data);
     if (!json) return ESP_FAIL;
-    int msg_id = esp_mqtt_client_publish(s_client, s_topic_log, json, 0, 1, 0);
+    int msg_id = esp_mqtt_client_publish(s_client, s_topic_log, json, 0, 0, 0);
     free(json);
     return (msg_id >= 0) ? ESP_OK : ESP_FAIL;
 }

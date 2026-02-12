@@ -169,7 +169,7 @@ static void handle_custom_data(uint8_t *data, int len) {
             strncpy(cfg.username, username_buf, sizeof(cfg.username) - 1);
             strncpy(cfg.password_mqtt, password_buf, sizeof(cfg.password_mqtt) - 1);
 
-            // 构造完整 URL: mqtt://ip:port (MQTT Client库会自动处理用户名密码，不需要拼在URL里，但在配置结构体里拼一下也没事)
+            // 构造完整 URL: mqtt://ip:port
             snprintf(cfg.full_url, sizeof(cfg.full_url), "mqtt://%s:%d", cfg.mqtt_host, cfg.mqtt_port);
 
             app_storage_save_net_config(&cfg);
