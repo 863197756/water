@@ -30,7 +30,7 @@ static void flush_timer_callback(TimerHandle_t xTimer) {
     // 关闭冲洗阀，恢复正常状态 (或关机)
     bsp_set_flush_valve(false); 
     bsp_set_pump(false);
-    // bsp_set_valve(false); // 进水阀视情况而定
+    // bsp_set_inlet_valve(false); // 进水阀视情况而定
 }
 /**
  * @brief 执行冲洗逻辑
@@ -46,7 +46,7 @@ void app_logic_start_flush(int reason) {
     s_is_flushing = true;
 
     // 动作：开进水阀、开冲洗阀、开泵
-    bsp_set_valve(true);
+    bsp_set_inlet_valve(true);
     bsp_set_flush_valve(true);
     vTaskDelay(pdMS_TO_TICKS(500)); // 延时保护
     bsp_set_pump(true);

@@ -17,12 +17,12 @@ void bsp_pump_valve_init(void) {
     gpio_config(&io_conf);
     
     // 默认关闭
-    bsp_set_valve(false);
+    bsp_set_inlet_valve(false);
     bsp_set_pump(false);
     bsp_set_flush_valve(false);
 }
 
-void bsp_set_valve(bool open) {
+void bsp_set_inlet_valve(bool open) {
     gpio_set_level(PIN_VALVE_IN, open ? 1 : 0);
 }
 

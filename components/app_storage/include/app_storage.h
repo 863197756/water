@@ -21,8 +21,20 @@ typedef struct {
 } net_config_t;
 
 typedef struct {
-    int total_flow;     // 总制水量
-    int filter_life;    // 滤芯剩余
+    int total_flow;      // 总制水量 (累计)
+    
+    // --- 新增：计费与管控字段 ---
+    int switch_state;    // 1: 开机, 0: 关机
+    int pay_mode;        // 0: 计时, 1: 计量
+    int days;            // 剩余天数 (计时模式)
+    int capacity;        // 剩余水量/L (计量模式)
+    
+    // --- 新增：各级滤芯剩余寿命 (天数) ---
+    int filter01;
+    int filter02;
+    int filter03;
+    int filter04;
+    int filter05;
 } device_status_t;
 
 typedef enum {

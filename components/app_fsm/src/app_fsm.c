@@ -10,11 +10,9 @@
 #include "app_storage.h"
 #include "net_manager.h"
 #include "mqtt_manager.h"
+#include "bsp_pump_valve.h"
 
-// 底层驱动接口 (外部实现)
-extern void bsp_set_inlet_valve(bool enable);   // 进水阀
-extern void bsp_set_flush_valve(bool enable);   // 冲洗阀 (废水阀)
-extern void bsp_set_pump(bool enable);          // 水泵
+
 
 // ============================================================================
 // 状态枚举与内部事件定义

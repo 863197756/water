@@ -7,4 +7,5 @@ idf_component_register(
         app_storage
         net_manager
         mqtt_manager
+        bsp_driver
 )

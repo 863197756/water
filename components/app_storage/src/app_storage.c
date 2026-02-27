@@ -66,27 +66,44 @@ esp_err_t app_storage_save_status(const device_status_t *status) {
     if (err != ESP_OK) return err;
 
     nvs_set_i32(handle, "flow", status->total_flow);
-    nvs_set_i32(handle, "filter", status->filter_life);
+    nvs_set_i32(handle, "switch", status->switch_state);
+    nvs_set_i32(handle, "pay_mode", status->pay_mode);
+    nvs_set_i32(handle, "days", status->days);
+    nvs_set_i32(handle, "capacity", status->capacity);
+    
+    nvs_set_i32(handle, "f1", status->filter01);
+    nvs_set_i32(handle, "f4", status->filter04); // RO膜
+    // 您可以根据需要把所有 filter 都加上，这里以最核心的1级和4级为例
     
     nvs_commit(handle);
     nvs_close(handle);
     return ESP_OK;
 }
 
-
 esp_err_t app_storage_load_status(device_status_t *status) {
     nvs_handle_t handle;
     esp_err_t err = nvs_open(NS_DEV_STAT, NVS_READONLY, &handle);
     if (err != ESP_OK) {
-        // 如果读取失败（比如第一次运行），给默认值
-        status->total_flow = 0;
-        status->filter_life = 100; // 假设 100%
+        // 如果读取失败（比如设备刚刷机第一次运行），给一组默认的安全放行值
+        memset(status, 0, sizeof(device_status_t));
+        status->switch_state = 1; // 默认开机
+        status->pay_mode = 0;     // 默认计时
+        status->days = 365;       // 默认给 1 年体验
+        status->capacity = 1000;  // 默认 1000 升
+        status->filter01 = 180;
+        status->filter04 = 720;
         return err;
     }
 
     int32_t val = 0;
     if (nvs_get_i32(handle, "flow", &val) == ESP_OK) status->total_flow = val;
-    if (nvs_get_i32(handle, "filter", &val) == ESP_OK) status->filter_life = val;
+    if (nvs_get_i32(handle, "switch", &val) == ESP_OK) status->switch_state = val;
+    if (nvs_get_i32(handle, "pay_mode", &val) == ESP_OK) status->pay_mode = val;
+    if (nvs_get_i32(handle, "days", &val) == ESP_OK) status->days = val;
+    if (nvs_get_i32(handle, "capacity", &val) == ESP_OK) status->capacity = val;
+    
+    if (nvs_get_i32(handle, "f1", &val) == ESP_OK) status->filter01 = val;
+    if (nvs_get_i32(handle, "f4", &val) == ESP_OK) status->filter04 = val;
 
     nvs_close(handle);
     return ESP_OK;

@@ -5,7 +5,7 @@
 void bsp_pump_valve_init(void);
 
 // 控制进水阀 (false:关, true:开)
-void bsp_set_valve(bool open);
+void bsp_set_inlet_valve(bool open);
 
 // 控制增压泵
 void bsp_set_pump(bool open);
