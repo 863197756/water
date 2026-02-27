@@ -163,6 +163,11 @@ esp_err_t protocol_parse_cmd(const char *json_str, int len, server_cmd_t *out_cm
     if (json_obj_get_int(&jctx, "days", &val) == 0) out_cmd->param.days = val;
     if (json_obj_get_int(&jctx, "capacity", &val) == 0) out_cmd->param.capacity = val;
 
+    // 获取 OTA 下载链接
+    if (out_cmd->method == CMD_METHOD_OTA) {
+        json_obj_get_string(&jctx, "url", out_cmd->param.ota_url, sizeof(out_cmd->param.ota_url));
+    }
+
     // 解析滤芯 filter01 - filter05
     char key[16];
     for (int i = 0; i < 5; i++) {

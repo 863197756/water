@@ -9,6 +9,9 @@
 #include "esp_event.h"
 #include "esp_netif.h"
 
+#include "esp_ota_ops.h"
+
+
 static const char *TAG = "MQTT_MGR";
 static esp_mqtt_client_handle_t s_client = NULL;
 static bool s_waiting_for_plan = false; // 新增：等待套餐下发标志
@@ -54,6 +57,10 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
         ESP_LOGI(TAG, "MQTT Connected");
         generate_topics();
         
+        // 如果是 OTA 更新后的第一次成功连接，确认固件有效，取消回滚！
+        esp_ota_mark_app_valid_cancel_rollback();
+        ESP_LOGI(TAG, "APP ROLLBACK 取消，当前固件标记为稳定运行版本");
+
 
         // 订阅指令
         esp_mqtt_client_subscribe(s_client, s_topic_cmd, 1);

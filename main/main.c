@@ -33,8 +33,14 @@ void test_protocol_function(void);
 
 void app_main(void)
 {
+    esp_log_level_set("wifi", ESP_LOG_ERROR);
+    esp_log_level_set("BLUFI_EXAMPLE", ESP_LOG_ERROR);  
+    esp_log_level_set("NimBLE", ESP_LOG_ERROR);  
+    esp_log_level_set("wifi_init", ESP_LOG_ERROR);  
 
-
+    // ESP_LOGW(TAG, "=========================================");
+    // ESP_LOGW(TAG, "  这是通过 OTA 升级后的 V2.0 版本！ ");
+    // ESP_LOGW(TAG, "=========================================");
     
    
     // 存储与系统初始化

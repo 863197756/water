@@ -15,7 +15,8 @@ typedef enum {
     CMD_METHOD_POWER       = 0, // 开关机
     CMD_METHOD_RESET       = 1, // 重置
     CMD_METHOD_UPDATE_PLAN = 2, // 更新套餐/滤芯
-    CMD_METHOD_SET_WASH    = 3  // 冲洗
+    CMD_METHOD_SET_WASH    = 3,  // 冲洗
+    CMD_METHOD_OTA         = 4   // OTA 更新
 } cmd_method_t;
 
 // 报警代码 (AlertCode)
@@ -56,6 +57,9 @@ typedef struct {
         
         // method=3
         int wash_duration; // 冲洗时长 (秒)
+
+        // method=4 (OTA 更新)
+        char ota_url[128]; // OTA 下载 URL
     } param;
 } server_cmd_t;
 

@@ -9,4 +9,5 @@ idf_component_register(
         esp_netif
         app_storage
         app_events
+        app_update
 )

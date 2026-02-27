@@ -10,6 +10,9 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/timers.h"
+#include "esp_https_ota.h"
+#include "esp_ota_ops.h"
+#include "esp_crt_bundle.h"
 
 
 static const char *TAG = "LOGIC";
@@ -128,7 +131,47 @@ static void app_logic_report_task(void *pvParameters) {
 
 
 
+// OTA 任务
+static void ota_task(void *pvParameter) {
+    char *url = (char *)pvParameter;
+    ESP_LOGI(TAG, "开始执行 OTA, 下载地址: %s", url);
 
+    esp_http_client_config_t config = {
+        .url = url,
+        .crt_bundle_attach = esp_crt_bundle_attach, // 使用系统自带的证书包校验 HTTPS
+        .timeout_ms = 10000,
+        .keep_alive_enable = true,
+    };
+
+    esp_https_ota_config_t ota_config = {
+        .http_config = &config,
+    };
+
+    ESP_LOGI(TAG, "正在下载固件并烧录...");
+    esp_err_t ret = esp_https_ota(&ota_config);
+    if (ret == ESP_OK) {
+        ESP_LOGI(TAG, "OTA 成功！准备重启...");
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        esp_restart(); // 烧录成功，主动重启
+    } else {
+        ESP_LOGE(TAG, "OTA 失败: %s", esp_err_to_name(ret));
+        // TODO: 可以通过 MQTT 上报 OTA 失败的 Alert
+    }
+
+    free(url); // 释放参数内存
+    vTaskDelete(NULL);
+}
+
+// 供 MQTT 收到指令后调用的触发函数
+void app_logic_trigger_ota(const char *url) {
+    // 拷贝 URL，防止指针在任务外被释放
+    char *url_copy = strdup(url); 
+    if (url_copy == NULL) {
+        ESP_LOGE(TAG, "内存不足，无法启动 OTA 任务");
+        return;
+    }
+    xTaskCreate(&ota_task, "ota_task", 8192, url_copy, 5, NULL);
+}
 
 
 
@@ -173,6 +216,11 @@ void app_logic_handle_cmd(server_cmd_t *cmd) {
         case CMD_METHOD_SET_WASH:
             ESP_LOGI(TAG, "Action: Force Wash");
             // TODO: 调用 bsp_pump_valve 开启冲洗
+            break;
+        
+        case CMD_METHOD_OTA:
+            ESP_LOGI(TAG, "Action: OTA Update");
+            app_logic_trigger_ota(cmd->param.ota_url);
             break;
             
         default:

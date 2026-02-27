@@ -10,6 +10,9 @@ idf_component_register(
         esp_event
         driver
         esp_wifi
+        app_update
+        esp_https_ota
+        esp-tls
 
         app_storage
         blufi_custom 
