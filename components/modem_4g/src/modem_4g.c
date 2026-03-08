@@ -23,7 +23,8 @@ static const char *TAG = "MODEM_4G";
 
 // APN 设置
 // #define MODEM_APN           "cmnet"
-#define MODEM_APN           "iot.10086.cn" 
+// #define MODEM_APN           "iot.10086.cn" 
+#define MODEM_APN           "ctnet"
 #define MODEM_PPP_USER      ""
 #define MODEM_PPP_PASSWORD  ""
 
@@ -150,6 +151,36 @@ void modem_4g_start(void) {
     }
     ESP_LOGI(TAG, "Modem sync OK (AT responds).");
 
+
+    // char at_res[128] = {0};
+
+    // // 1. 强制关闭热插拔检测
+    // esp_modem_at(s_dce, "AT+CSDT=0\r\n", at_res, 1000);
+    // ESP_LOGI(TAG, "Disable Hot-Swap (CSDT=0): %s", at_res);
+
+    // // 2. 查询当前的真实错误代码
+    // esp_modem_at(s_dce, "AT+CPIN?\r\n", at_res, 1000);
+    // ESP_LOGI(TAG, "Initial CPIN Status: %s", at_res);
+
+    // // 3. 重启射频，强制模组重新给 SIM 卡上电握手 (关键！)
+    // ESP_LOGI(TAG, "Toggling Radio (CFUN 0 -> 1) to force SIM re-init...");
+    // esp_modem_at(s_dce, "AT+CFUN=0\r\n", at_res, 2000);
+    // vTaskDelay(pdMS_TO_TICKS(1000));
+    // esp_modem_at(s_dce, "AT+CFUN=1\r\n", at_res, 2000);
+    
+    // // 等待 3 秒让模组完成读卡流程
+    // vTaskDelay(pdMS_TO_TICKS(3000)); 
+
+    // // 4. 再次查询状态
+    // esp_modem_at(s_dce, "AT+CPIN?\r\n", at_res, 1000);
+    // ESP_LOGI(TAG, "CPIN Status after radio toggle: %s", at_res);
+
+
+// char ignore_cd_res[64] = {0};
+//     esp_modem_at(s_dce, "AT+CSDT=0\r\n", ignore_cd_res, 1000);
+//     ESP_LOGI(TAG, "Disable SIM Hot-Swap: %s", ignore_cd_res);
+
+
     // 2. 获取 IMEI (模组串号) - 验证模组核心工作正常
     char imei[32] = {0};
     if (esp_modem_get_imei(s_dce, imei) == ESP_OK) {
@@ -158,7 +189,11 @@ void modem_4g_start(void) {
         ESP_LOGE(TAG, "Failed to get IMEI");
     }
 
-    // 3. 获取 IMSI (SIM卡串号) - 验证 SIM 卡是否插好、是否能正常读取
+  
+
+  
+
+      // 3. 获取 IMSI (SIM卡串号) - 验证 SIM 卡是否插好、是否能正常读取
     char imsi[32] = {0};
     if (esp_modem_get_imsi(s_dce, imsi) == ESP_OK) {
         ESP_LOGI(TAG, "SIM IMSI (SIM Card OK): %s", imsi);
