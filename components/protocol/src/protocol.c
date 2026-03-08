@@ -104,9 +104,6 @@ char* protocol_pack_log(const log_report_t *data) {
     cJSON_AddNumberToObject(root, "tdsOut", data->tds_out);
     cJSON_AddNumberToObject(root, "tdsBackup", data->tds_backup);
 
-
-
-
     char *str = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
     return str;
@@ -136,48 +133,52 @@ esp_err_t protocol_parse_cmd(const char *json_str, int len, server_cmd_t *out_cm
 
     memset(out_cmd, 0, sizeof(server_cmd_t));
 
-    // 2. 解析第一层字段
-    // 获取 cmdid
-    if (json_obj_get_string(&jctx, "cmdid", out_cmd->cmd_id, sizeof(out_cmd->cmd_id)) != 0) {
-        // cmdid 可能是可选的或者解析失败
+    // 2. 先解析第一层 (根节点) 字段
+    // 【关键】因为稍后会进入 param 内部，所以外层字段必须在此刻先读取完毕！
+    if (json_obj_get_string(&jctx, "cmdId", out_cmd->cmd_id, sizeof(out_cmd->cmd_id)) != 0) {
         out_cmd->cmd_id[0] = '\0';
     }
 
-    // 获取 method
     int val = 0;
     if (json_obj_get_int(&jctx, "method", &val) == 0) {
         out_cmd->method = val;
     }
 
-    // 3. 解析 param 内部字段
-    // json_parser 通常会扫描所有 token，所以即使在嵌套对象里，
-    // 只要字段名是唯一的(或者我们顺序读取)，直接 get_int 也能获取到。
-    
-    // switch (注意：switch 是 C 语言关键字，结构体里我们叫 switch_status)
-    if (json_obj_get_int(&jctx, "switch", &val) == 0) {
-        out_cmd->param.switch_status = val;
-    }
-
-    if (json_obj_get_int(&jctx, "saleMode", &val) == 0) out_cmd->param.sale_mode = val;
-    if (json_obj_get_int(&jctx, "payMode", &val) == 0) out_cmd->param.pay_mode = val;
-    if (json_obj_get_int(&jctx, "days", &val) == 0) out_cmd->param.days = val;
-    if (json_obj_get_int(&jctx, "capacity", &val) == 0) out_cmd->param.capacity = val;
-
-    // 获取 OTA 下载链接
+    // OTA 下载链接在某些协议定义下可能放在第一层
     if (out_cmd->method == CMD_METHOD_OTA) {
         json_obj_get_string(&jctx, "url", out_cmd->param.ota_url, sizeof(out_cmd->param.ota_url));
     }
 
-    // 解析滤芯 filter01 - filter05
-    char key[16];
-    for (int i = 0; i < 5; i++) {
-        snprintf(key, sizeof(key), "filter%02d", i + 1);
-        if (json_obj_get_int(&jctx, key, &val) == 0) {
-            out_cmd->param.filter[i] = val;
+    // 3. 进入嵌套对象 param
+    // 注意：这个函数只有两个参数，执行成功后，jctx 的指针会“进入” param 内部
+    if (json_obj_get_object(&jctx, "param") == 0) {
+        
+        // 现在 jctx 的上下文已经在 param 里面了，直接读取内部字段
+        if (json_obj_get_int(&jctx, "switch", &val) == 0) out_cmd->param.switch_status = val;
+        if (json_obj_get_int(&jctx, "saleMode", &val) == 0) out_cmd->param.sale_mode = val;
+        if (json_obj_get_int(&jctx, "payMode", &val) == 0) out_cmd->param.pay_mode = val;
+        if (json_obj_get_int(&jctx, "days", &val) == 0) out_cmd->param.days = val;
+        if (json_obj_get_int(&jctx, "capacity", &val) == 0) out_cmd->param.capacity = val;
+
+        // 如果 OTA url 是放在 param 里面的，在这里再尝试获取一次
+        if (out_cmd->method == CMD_METHOD_OTA && strlen(out_cmd->param.ota_url) == 0) {
+            json_obj_get_string(&jctx, "url", out_cmd->param.ota_url, sizeof(out_cmd->param.ota_url));
         }
+
+        // 解析滤芯 filter01 - filter05
+        char key[16];
+        for (int i = 0; i < 5; i++) {
+            snprintf(key, sizeof(key), "filter%02d", i + 1);
+            if (json_obj_get_int(&jctx, key, &val) == 0) {
+                out_cmd->param.filter[i] = val;
+            }
+        }
+        
+        // 如果底层组件有提供退出对象的接口 (如 json_obj_leave_object(&jctx)) 可以调用，
+        // 但对于单次单向解析，直接走到 json_parse_end 也是安全的。
     }
 
-    // 4. 结束解析
+    // 4. 结束解析，释放资源
     json_parse_end(&jctx);
     return ESP_OK;
 }
