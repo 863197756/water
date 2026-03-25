@@ -11,7 +11,8 @@
 #include "net_manager.h"
 #include "mqtt_manager.h"
 #include "bsp_pump_valve.h"
-
+#include "bsp_sensor.h"
+#include "bsp_pump_valve.h"
 
 
 // ============================================================================
@@ -39,6 +40,7 @@ ESP_EVENT_DEFINE_BASE(WATER_INTERNAL_EVENTS);
 enum {
     WATER_EV_EVALUATE = 0,   // 重新评估水机状态
     WATER_EV_TRIGGER_WASH,   // 强制触发一次冲洗
+    WATER_EV_WASH_DONE,      // 冲洗定时器结束
 };
 
 // ============================================================================
@@ -61,6 +63,8 @@ static uint32_t s_total_making_time = 0;    // 累计制水时长(秒) - 用于2
 static uint32_t s_time_since_last_wash = 0; // 距离上次冲洗时长(秒) - 用于6小时冲洗
 static uint32_t s_fault_timer_seconds = 0;  // 故障恢复倒计时(秒) - 用于30分钟恢复
 
+static float s_accumulated_liters = 0.0f;
+
 static TimerHandle_t s_wash_timer = NULL;   // 18秒冲洗倒计时
 
 // ============================================================================
@@ -77,13 +81,13 @@ static const char *state_name(fsm_state_t state) {
     }
 }
 
-static const char *net_type_name(int type) {
-    switch (type) {
-        case APP_NET_TYPE_WIFI: return "WIFI";
-        case APP_NET_TYPE_PPP: return "PPP";
-        default: return "UNKNOWN";
-    }
-}
+// static const char *net_type_name(int type) {
+//     switch (type) {
+//         case APP_NET_TYPE_WIFI: return "WIFI";
+//         case APP_NET_TYPE_PPP: return "PPP";
+//         default: return "UNKNOWN";
+//     }
+// }
 
 static void transition_to(fsm_state_t next, const char *reason) {
     if (s_state == next) return;
@@ -142,6 +146,13 @@ static void transition_water_state(water_state_t next, const char *reason) {
             esp_event_post(WATER_INTERNAL_EVENTS, WATER_EV_TRIGGER_WASH, NULL, 0, 0);
         }
         s_making_water_seconds = 0;
+        // if (s_accumulated_liters > 0.001f) { //白嫖漏洞
+        //     device_status_t status;
+        //     app_storage_load_status(&status);
+        //     status.total_flow += (int)(s_accumulated_liters * 1000.0f);
+        //     app_storage_save_status(&status);
+        //     s_accumulated_liters = 0.0f; // 存完清零
+        // }
         // TODO: 可在此处将制水时长换算为流量并保存 NVS
     }
     if (prev == WATER_STATE_WASHING) {
@@ -219,7 +230,7 @@ static void evaluate_water_state(void) {
 // --- 冲洗结束定时器回调 ---
 static void wash_timer_cb(TimerHandle_t xTimer) {
     ESP_LOGI(TAG, "18秒冲洗结束，请求重新评估状态...");
-    esp_event_post(WATER_INTERNAL_EVENTS, WATER_EV_EVALUATE, NULL, 0, 0);
+    esp_event_post(WATER_INTERNAL_EVENTS, WATER_EV_WASH_DONE, NULL, 0, 0);
 }
 
 // ============================================================================
@@ -232,6 +243,9 @@ static void on_water_internal_event(void *arg, esp_event_base_t event_base, int3
         evaluate_water_state();
     } else if (event_id == WATER_EV_TRIGGER_WASH) {
         transition_water_state(WATER_STATE_WASHING, "内部触发强制冲洗");
+    } else if (event_id == WATER_EV_WASH_DONE) {
+        s_water_state = WATER_STATE_INIT;
+        evaluate_water_state();
     }
 }
 
@@ -303,19 +317,29 @@ static void on_app_event(void *arg, esp_event_base_t event_base, int32_t event_i
             esp_event_post(WATER_INTERNAL_EVENTS, WATER_EV_TRIGGER_WASH, NULL, 0, 0);
             break;
 
+        case APP_EVENT_CMD_EVALUATE:
+            ESP_LOGI(TAG, "收到云端参数更新，触发状态机重新评估...");
+            esp_event_post(WATER_INTERNAL_EVENTS, WATER_EV_EVALUATE, NULL, 0, 0);
+            break;
+
         default:
             break;
     }
 }
 
 // ============================================================================
-// [模块四] 制水看门狗：处理所有的超时规则
+// [模块四] 制水看门狗：处理超时保护与【流量精准计费结算】
 // ============================================================================
 static void water_monitor_task(void *pvParameters) {
+    // 假设流量计规格：450 个脉冲 = 1 升水 (请根据您的流量计实际规格修改)
+    const float PULSES_PER_LITER = 450.0f; 
+    
+  
+
     while(1) {
         vTaskDelay(pdMS_TO_TICKS(1000)); // 1秒周期
 
-        // 1. 规则：连续制水 6 小时无水满，报故障停机 30 分钟后恢复
+        // 1. 故障恢复规则：连续制水 6 小时无水满，报故障停机 30 分钟后恢复
         if (s_water_state == WATER_STATE_FAULT) {
             s_fault_timer_seconds++;
             if (s_fault_timer_seconds >= 30 * 60) {
@@ -326,7 +350,7 @@ static void water_monitor_task(void *pvParameters) {
             }
         }
 
-        // 2. 规则：每 6 小时自动冲洗一次
+        // 2. 待机冲洗规则：每 6 小时自动冲洗一次
         if (s_water_state != WATER_STATE_FAULT && s_water_state != WATER_STATE_WASHING) {
             s_time_since_last_wash++;
             if (s_time_since_last_wash >= 6 * 3600) {
@@ -335,24 +359,141 @@ static void water_monitor_task(void *pvParameters) {
             }
         }
 
-        // 3. 运行期的超时保护与累计统计
+        // 3. 制水运行期的：超时保护 与【流量结算】
         if (s_water_state == WATER_STATE_MAKING) {
             s_making_water_seconds++;
             s_total_making_time++; 
+
+            // --- 【新增】读取流量计并精准扣费 ---
+            uint32_t pulses = bsp_sensor_get_flow_pulses();
+            bsp_sensor_clear_flow_pulses(); // 读取后立刻清零，等待下一秒累加
+
+            if (pulses > 0) {
+                // 计算这 1 秒内的真实制水量 (小数)
+                float current_liters = (float)pulses / PULSES_PER_LITER;
+                s_accumulated_liters += current_liters;
+
+                // 当累积水量达到 1 升时，才进行 NVS 扣减 (保护 Flash 寿命，防精度丢失)
+                if (s_accumulated_liters >= 1.0f) {
+                    int deduct_liters = (int)s_accumulated_liters; // 提取整数部分
+                    s_accumulated_liters -= deduct_liters;         // 留下零头下次算
+
+                    device_status_t status;
+                    app_storage_load_status(&status);
+
+                    status.total_flow += (deduct_liters * 1000); // NVS里总水量单位是毫升
+
+                    // 核心拦截：如果是计量套餐，执行扣费
+                    if (status.pay_mode == 1) { 
+                        status.capacity -= deduct_liters;
+                        ESP_LOGI(TAG, "扣除套餐水量 %d L, 剩余 %d L", deduct_liters, status.capacity);
+
+                        if (status.capacity <= 0) {
+                            ESP_LOGE(TAG, "🚨 套餐水量已彻底用尽，强制停机拦截！");
+                            status.capacity = 0;
+                            // 抛出评估事件，状态机会因为鉴权不通过自动关闭水泵和进水阀
+                            esp_event_post(WATER_INTERNAL_EVENTS, WATER_EV_EVALUATE, NULL, 0, 0);
+                        }
+                    }
+                    app_storage_save_status(&status); // 存入 Flash
+                }
+            }
             
-            // 故障触发判断
+            // 4. 制水超时保护：连续制水超过 6 小时
             if (s_making_water_seconds >= 6 * 3600) {
                 ESP_LOGE(TAG, "严重：连续制水超过6小时，触发保护停机！");
                 transition_water_state(WATER_STATE_FAULT, "制水超时");
             }
 
-            // 规则：累计制水满 2 小时，强制插入一次冲洗
+            // 5. 制水期间维护：累计制水满 2 小时强制冲洗
             if (s_total_making_time >= 2 * 3600) {
                 ESP_LOGI(TAG, "累计制水达2小时，触发维护冲洗！");
                 s_total_making_time = 0; 
                 esp_event_post(WATER_INTERNAL_EVENTS, WATER_EV_TRIGGER_WASH, NULL, 0, 0);
             }
+        } else {
+            // 如果不在制水状态，清空残留的水量零头和脉冲，防止误算
+            bsp_sensor_clear_flow_pulses();
+            // s_accumulated_liters = 0.0f; //白嫖漏洞
         }
+    }
+}
+
+// --- 辅助函数：获取制水业务状态的字符串名称 ---
+static const char *water_state_name(water_state_t state) {
+    switch (state) {
+        case WATER_STATE_INIT: return "INIT (初始化)";
+        case WATER_STATE_WASHING: return "WASHING (冲洗中)";
+        case WATER_STATE_MAKING: return "MAKING_WATER (制水中)";
+        case WATER_STATE_FULL: return "WATER_FULL (水满待机)";
+        case WATER_STATE_SHORTAGE: return "SHORTAGE (缺水报警)";
+        case WATER_STATE_FAULT: return "FAULT (超时故障)";
+        default: return "UNKNOWN";
+    }
+}
+
+// ============================================================================
+// [模块五] 系统实时诊断面板任务 (Dashboard)
+// ============================================================================
+static void system_dashboard_task(void *pvParameters) {
+while (1) {
+        // 每 5 秒刷新一次面板
+        vTaskDelay(pdMS_TO_TICKS(5000));
+
+        // 获取最新 NVS 存储数据
+        device_status_t status;
+        app_storage_load_status(&status);
+
+        printf("\n");
+        printf("========================================================\n");
+        printf("              [ 智能净水器系统实时诊断面板 ]            \n");
+        printf("========================================================\n");
+        
+        // 1. 核心状态机
+        printf(" [1] 核心状态 (看门狗监控)\n");
+        printf("  ├─ 网络连通状态 : %s\n", state_name(s_state));
+        printf("  ├─ 制水业务状态 : %s\n", water_state_name(s_water_state));
+        printf("  ├─ 单次连续制水 : %lu 秒 (限 6h 超时保护)\n", s_making_water_seconds);
+        printf("  ├─ 累计制水时长 : %lu 秒 (满 2h 触发维护冲洗)\n", s_total_making_time);
+        printf("  ├─ 距上次冲洗   : %lu 秒 (满 6h 触发定期冲洗)\n", s_time_since_last_wash);
+        printf("  └─ 故障恢复倒数 : %lu 秒\n", s_fault_timer_seconds);
+        printf("\n");
+
+        // 2. 硬件传感器实时读数
+        printf(" [2] 传感器实时数据\n");
+        printf("  ├─ 原水水压 (低压): %s\n", s_hw_low_pressure ? "【缺水/断开】" : "正常/闭合");
+        printf("  ├─ 储水压力 (高压): %s\n", s_hw_high_pressure ? "【水满/闭合】" : "未满/断开");
+        printf("  ├─ 实时水温 (NTC) : %.1f °C\n", bsp_sensor_get_temperature());
+        printf("  ├─ 水质 TDS (ppm) : 进水 %d | 纯水 %d | 备用 %d\n", 
+                bsp_sensor_get_tds_in(), bsp_sensor_get_tds_out(), bsp_sensor_get_tds_backup());
+        printf("  └─ 流量计累计脉冲 : %lu (读后清零前)\n", bsp_sensor_get_flow_pulses());
+        printf("\n");
+
+        // 3. 继电器与外设执行器
+        printf(" [3] 外设执行器状态\n");
+        printf("  ├─ 进水电磁阀     : %s\n", bsp_get_inlet_valve_state() ? "■ 开启" : "□ 关闭");
+        printf("  ├─ 废水电磁阀     : %s\n", bsp_get_flush_valve_state() ? "■ 开启" : "□ 关闭");
+        printf("  └─ 增压水泵       : %s\n", bsp_get_pump_state() ? "■ 运行" : "□ 停止");
+        printf("\n");
+
+        // 4. 用户套餐与计费参数
+        printf(" [4] NVS 控制参数 (云端同步)\n");
+        printf("  ├─ 设备软开关机   : %s\n", status.switch_state ? "开机" : "关机拦截");
+        printf("  ├─ 当前计费模式   : %s\n", status.pay_mode == 0 ? "计时模式" : "计量模式");
+
+        float display_capacity = status.capacity;
+        if (status.pay_mode == 1) {
+            display_capacity -= s_accumulated_liters; // 实时扣减零头显示
+        }
+        uint32_t display_total_flow = status.total_flow + (uint32_t)(s_accumulated_liters * 1000.0f);
+        
+        // 使用 %.2f 打印带两位小数的升数！
+        printf("  ├─ 剩余天数/水量  : %d 天 / %.2f L\n", status.days, display_capacity);
+        printf("  ├─ 历史总制水量   : %lu mL\n", display_total_flow);
+        
+        printf("  └─ 滤芯剩余寿命   : F1=%d天, F2=%d天, F3=%d天, F4(RO)=%d天, F5=%d天\n", 
+                status.filter01, status.filter02, status.filter03, status.filter04, status.filter05);
+        printf("========================================================\n\n");
     }
 }
 
@@ -368,7 +509,10 @@ void app_fsm_init(void) {
     // 初始化定时器与任务
     s_wash_timer = xTimerCreate("wash_tmr", pdMS_TO_TICKS(18000), pdFALSE, NULL, wash_timer_cb);
     xTaskCreate(water_monitor_task, "water_dog", 3072, NULL, 5, NULL);
-    
+    // 【新增】启动诊断面板任务 (堆栈稍微给大一点点保证 printf 不溢出)
+    xTaskCreate(system_dashboard_task, "sys_dash", 4096, NULL, 4, NULL);
+
+
     // 状态机初始状态
     s_state = FSM_STATE_WAIT_NET;
     s_water_state = WATER_STATE_INIT;

@@ -26,6 +26,7 @@ typedef enum {
     
     // --- 业务控制事件 ---
     APP_EVENT_CMD_START_WASH,          // 云端下发或按键触发的冲洗指令
+    APP_EVENT_CMD_EVALUATE,            // 云端更新套餐或开关机后，要求状态机重新评估鉴权
     APP_EVENT_OTA_START,               // 触发OTA升级
 } app_event_id_t;
 

@@ -24,4 +24,6 @@ idf_component_register(
         protocol
         bsp_driver 
         modem_4g 
+        
+        app_events
 )

@@ -17,7 +17,8 @@
 #include "app_logic.h"
 #include "mqtt_manager.h"
 #include "app_fsm.h"
-
+#include "bsp_pump_valve.h"
+#include "bsp_sensor.h"
 
 // 未实现的组件
 // #include "bsp_pump_valve.h" 
@@ -55,6 +56,9 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
+    bsp_pump_valve_init(); 
+    bsp_sensor_init();
+
     // 启动连接状态机（统一编排网络 / MQTT 生命周期）
     app_fsm_init();
 
@@ -72,10 +76,6 @@ void app_main(void)
     // 它会根据配置，初始化传感器、控制板等组件。
     app_logic_init();
     
-    
- 
-
-
 
     // test_protocol_function();
     time_manager_init();

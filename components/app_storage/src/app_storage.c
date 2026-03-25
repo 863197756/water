@@ -72,8 +72,10 @@ esp_err_t app_storage_save_status(const device_status_t *status) {
     nvs_set_i32(handle, "capacity", status->capacity);
     
     nvs_set_i32(handle, "f1", status->filter01);
+    nvs_set_i32(handle, "f2", status->filter02);
+    nvs_set_i32(handle, "f3", status->filter03);
     nvs_set_i32(handle, "f4", status->filter04); // RO膜
-    // 您可以根据需要把所有 filter 都加上，这里以最核心的1级和4级为例
+    nvs_set_i32(handle, "f5", status->filter05);
     
     nvs_commit(handle);
     nvs_close(handle);
@@ -103,7 +105,10 @@ esp_err_t app_storage_load_status(device_status_t *status) {
     if (nvs_get_i32(handle, "capacity", &val) == ESP_OK) status->capacity = val;
     
     if (nvs_get_i32(handle, "f1", &val) == ESP_OK) status->filter01 = val;
+    if (nvs_get_i32(handle, "f2", &val) == ESP_OK) status->filter02 = val;
+    if (nvs_get_i32(handle, "f3", &val) == ESP_OK) status->filter03 = val;
     if (nvs_get_i32(handle, "f4", &val) == ESP_OK) status->filter04 = val;
+    if (nvs_get_i32(handle, "f5", &val) == ESP_OK) status->filter05 = val;
 
     nvs_close(handle);
     return ESP_OK;
