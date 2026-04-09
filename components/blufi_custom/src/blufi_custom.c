@@ -59,6 +59,31 @@ static void blufi_on_reset(int reason) {
 
 static void blufi_on_sync(void) {
     // 只有在 sync 之后，才算协议栈准备好，但 Blufi 初始化通常在后面
+    // 确保协议栈同步成功，MAC 地址已就绪
+    
+
+    // 【核心修复】：必须在这里初始化 Blufi Profile！
+    // 只有当这里初始化完成后，底层才会触发 ESP_BLUFI_EVENT_INIT_FINISH，
+    // 此时再去调用 esp_blufi_adv_start() 就绝对安全了。
+    int rc;
+
+    // 1. 确保底层的蓝牙 MAC 地址已经生成并准备就绪
+    // 参数 0 表示首选 Public 地址 (如果硬件支持)，否则回退到 Random 地址
+    rc = ble_hs_util_ensure_addr(0);
+    if (rc != 0) {
+        BLUFI_ERROR("获取蓝牙 MAC 地址失败！错误码: %d", rc);
+        return;
+    }
+
+    BLUFI_INFO("NimBLE 底层同步完成，MAC 地址已就绪！");
+
+    // 2. 【核心】此时底层已经准备完美，可以安全地启动 Blufi 配网广播了
+    rc = esp_blufi_profile_init();
+    if (rc != 0) {
+        BLUFI_ERROR("Blufi profile 初始化失败！错误码: %d", rc);
+    } else {
+        BLUFI_INFO("Blufi profile 初始化成功，开始广播配网信号...");
+    }
 }
 
 // NimBLE 主机任务 (必须一直运行)
@@ -413,9 +438,10 @@ esp_err_t blufi_custom_init(void) {
     ret = esp_blufi_register_callbacks(&example_callbacks);
     if (ret) return ret;
 
-    // 4. 启动 Blufi
-    ret = esp_blufi_profile_init();
-    return ret;
+    // // 4. 启动 Blufi
+    // ret = esp_blufi_profile_init();
+    // return ret;
+    return ESP_OK;
 }
 
 void blufi_custom_deinit(void) {

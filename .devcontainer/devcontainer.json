@@ -7,9 +7,9 @@
 		"vscode": {
 			"settings": {
 				"terminal.integrated.defaultProfile.linux": "bash",
-				"idf.espIdfPath": "/opt/esp/idf",
-				"idf.toolsPath": "/opt/esp",
-				"idf.gitPath": "/usr/bin/git"
+				"idf.espIdfPath": "D:\\Apps\\Development\\ESP-IDF\\v5.5.3\\esp-idf",
+				"idf.toolsPath": "D:\\Apps\\Development\\ESP-IDF\\tools",
+				"idf.gitPath": "D:\\Apps\\Development\\Git\\cmd"
 			},
 			"extensions": [
 				"espressif.esp-idf-extension",
