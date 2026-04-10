@@ -21,16 +21,12 @@
 #include "bsp_sensor.h"
 #include "bsp_led.h"
 
-// 未实现的组件
-// #include "bsp_pump_valve.h" 
-// #include "modem_4g.h"
 
 static const char *TAG = "MAIN";
 
 
-#define GPIO_KEY_RESET 0 // 假设 BOOT 键
 
-void key_scan_task(void *arg);
+
 void test_protocol_function(void);
 
 
@@ -91,10 +87,10 @@ static void led_hardware_test_task(void *pvParameters) {
 
 void app_main(void)
 {
-    esp_log_level_set("wifi", ESP_LOG_ERROR);
-    esp_log_level_set("BLUFI_EXAMPLE", ESP_LOG_ERROR);  
-    esp_log_level_set("NimBLE", ESP_LOG_ERROR);  
-    esp_log_level_set("wifi_init", ESP_LOG_ERROR);  
+    // esp_log_level_set("wifi", ESP_LOG_ERROR);
+    // esp_log_level_set("BLUFI_EXAMPLE", ESP_LOG_ERROR);  
+    // esp_log_level_set("NimBLE", ESP_LOG_ERROR);  
+    // esp_log_level_set("wifi_init", ESP_LOG_ERROR);  
 
     // ESP_LOGW(TAG, "=========================================");
     // ESP_LOGW(TAG, "  这是通过 OTA 升级后的 V2.0 版本！ ");
