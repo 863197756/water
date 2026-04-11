@@ -41,6 +41,7 @@
 
 static const char *TAG = "BLUFI";
 static bool s_ble_is_connected = false; // 记录蓝牙连接状态
+static bool s_blufi_profile_inited = false; // 防止 NimBLE 重复 sync 导致重复 init
 
 static wifi_config_t sta_config;
 static bool gl_sta_connected = false;
@@ -78,6 +79,11 @@ static void blufi_on_sync(void) {
     BLUFI_INFO("NimBLE 底层同步完成，MAC 地址已就绪！");
 
     // 2. 【核心】此时底层已经准备完美，可以安全地启动 Blufi 配网广播了
+    if (s_blufi_profile_inited) {
+        BLUFI_INFO("Blufi profile already inited, skip");
+        return;
+    }
+    s_blufi_profile_inited = true;
     rc = esp_blufi_profile_init();
     if (rc != 0) {
         BLUFI_ERROR("Blufi profile 初始化失败！错误码: %d", rc);
@@ -124,7 +130,8 @@ static void send_json_status(const char *key, int value) {
 //  自定义数据处理 (核心业务逻辑)
 // ---------------------------------------------------------
 static void handle_custom_data(uint8_t *data, int len) {
-    BLUFI_INFO("收到自定义数据 (Len: %d): %s", len, data);
+    // data 不保证以 \0 结尾，不能直接用 %s 打印，避免越界读导致异常/断链
+    BLUFI_INFO("收到自定义数据 (Len: %d)", len);
 
     // 1. 安全处理：确保是字符串
     char *json_str = (char *)malloc(len + 1);
@@ -285,6 +292,8 @@ static void example_event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_para
     case ESP_BLUFI_EVENT_BLE_CONNECT:
         BLUFI_INFO("蓝牙已连接");
         s_ble_is_connected = true;
+        // 连接后停止广播，减少异常边缘情况（官方例程同样如此）
+        esp_blufi_adv_stop();
         blufi_security_init();
         break;
     case ESP_BLUFI_EVENT_BLE_DISCONNECT:
@@ -376,6 +385,10 @@ esp_err_t blufi_custom_init(void) {
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &ip_event_handler, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(APP_EVENTS, APP_EVENT_MQTT_PLAN_RECEIVED, &on_app_event, NULL));
 
+    // 0. 【关键】先注册 Blufi 回调，确保 NimBLE sync 回调里 profile_init 后能正确派发事件
+    ret = esp_blufi_register_callbacks(&example_callbacks);
+    if (ret) return ret;
+
     // 1. 控制器层初始化 (Controller)
 #if CONFIG_BT_CONTROLLER_ENABLED || !CONFIG_BT_NIMBLE_ENABLED
     ESP_ERROR_CHECK(esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT)); // 释放经典蓝牙内存
@@ -424,6 +437,9 @@ esp_err_t blufi_custom_init(void) {
     ret = ble_svc_gap_device_name_set("BLUFI_DEVICE");
     if (ret) return ret;
 
+    // (C2) 初始化 NimBLE Store（官方例程会调用，缺失时可能影响配对/绑定相关行为）
+    ble_store_config_init();
+
     // (D) 初始化 BTC 任务 ***
     esp_blufi_btc_init();
 
@@ -433,10 +449,6 @@ esp_err_t blufi_custom_init(void) {
     
     BLUFI_INFO("NimBLE Stack & BTC Task Initialized");
 #endif
-
-    // 3. 注册 Blufi 回调
-    ret = esp_blufi_register_callbacks(&example_callbacks);
-    if (ret) return ret;
 
     // // 4. 启动 Blufi
     // ret = esp_blufi_profile_init();
