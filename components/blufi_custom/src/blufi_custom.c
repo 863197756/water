@@ -1,491 +1,787 @@
-// blufi_custom.c 自定义 BLUFI 实现
+// blufi_custom.c
+// 说明：已移除 ESP-IDF BLUFI 协议栈，改为“自定义 BLE GATT + JSON”配网通道。
+// 配网窗口：每次上电/重启后开放 120 秒；超时后停止广播并拒绝写入。
+// 单连接：sdkconfig 已设置 NimBLE/BLE 最大连接数为 1。
+//
+// 协议步骤（与《蓝牙通信协议.xlsx》一致，并增加“必须按步骤”门禁）：
+// 1) {"statusBLE":0}            -> 设备回 {"statusBLE":0}
+// 2) {"statusNet":0/1}          -> 设备回 {"statusNet":1} （0=WiFi,1=4G）
+// 3) WiFi 模式：{"ssid":"..","password":".."}
+//    -> 设备开始连接时回 {"statusWiFi":0}
+//    -> 成功（拿到 IP）回 {"statusWiFi":1}
+//    -> 失败回 {"statusWiFi":2}
+// 4) {"mqttserver":"ip:port","username":"..","password":".."}
+//    -> 设备在“MQTT 已完成登录并成功发送 init 且收到套餐 cmd（plan）”时回 {"statusMQTT":0}
+//       （当前沿用 APP_EVENT_MQTT_PLAN_RECEIVED 触发）
+// 5) {"statusBLE":1}            -> 设备回 {"statusBLE":1} 并主动断开 BLE
+//
+// 注意：
+// - 该通道为明文 JSON；安全策略依赖“配网窗口 + 步骤门禁”。
+// - 小程序侧建议请求 MTU（例如 256），避免 mqtt 配置 JSON 超过 20 字节限制。
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "freertos/event_groups.h"
-#include "esp_system.h"
-#include "esp_wifi.h"
+
+#include "esp_err.h"
 #include "esp_event.h"
 #include "esp_log.h"
-#include "esp_blufi_api.h"
-#include "esp_blufi.h"
-#include "blufi_custom.h"
-#include "app_events.h"
+#include "esp_random.h"
+#include "esp_system.h"
+#include "esp_timer.h"
+#include "esp_wifi.h"
 
-
-#if CONFIG_BT_CONTROLLER_ENABLED || !CONFIG_BT_NIMBLE_ENABLED
 #include "esp_bt.h"
-#endif
 
-#ifdef CONFIG_BT_BLUEDROID_ENABLED
-#include "esp_bt_main.h"
-#include "esp_bt_device.h"
-#endif
-
-#ifdef CONFIG_BT_NIMBLE_ENABLED
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
 #include "host/ble_hs.h"
 #include "host/util/util.h"
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
-#include "console/console.h"
-#endif
 
-// 引入组件头文件
-#include "blufi_custom_priv.h"
-#include "json_parser.h" 
+#include "json_parser.h"
+
+#include "app_events.h"
 #include "app_storage.h"
+#include "blufi_custom.h"
 
-static const char *TAG = "BLUFI";
-static bool s_ble_is_connected = false; // 记录蓝牙连接状态
-static bool s_blufi_profile_inited = false; // 防止 NimBLE 重复 sync 导致重复 init
-
-static wifi_config_t sta_config;
-static bool gl_sta_connected = false;
-
-// --- NimBLE 必须的辅助函数与变量 ---
-#ifdef CONFIG_BT_NIMBLE_ENABLED
-// Blufi GATT Server 初始化函数 (在 IDF 组件内部)
-extern int esp_blufi_gatt_svr_init(void);
-// 其它回调
+// 某些 ESP-IDF/NimBLE 组合环境下，该函数的声明没有被默认头文件暴露出来，
+// 但链接阶段仍由 NimBLE store 组件提供实现。这里显式声明以避免编译报错：
+// "implicit declaration of function 'ble_store_config_init'".
 void ble_store_config_init(void);
 
+// -----------------------------
+// 日志
+// -----------------------------
+#define PROV_TAG "BLE_PROV"
+#define PROV_I(fmt, ...) ESP_LOGI(PROV_TAG, fmt, ##__VA_ARGS__)
+#define PROV_W(fmt, ...) ESP_LOGW(PROV_TAG, fmt, ##__VA_ARGS__)
+#define PROV_E(fmt, ...) ESP_LOGE(PROV_TAG, fmt, ##__VA_ARGS__)
 
-static void blufi_on_reset(int reason) {
-    BLUFI_ERROR("NimBLE Reset: reason=%d", reason);
+// -----------------------------
+// 参数
+// -----------------------------
+#define PROV_WINDOW_SEC          120
+#define PROV_JSON_MAX_LEN        512   // 单次写入最大 JSON 长度（需 <= MTU-3；建议小程序侧请求 MTU=256）
+#define PROV_WIFI_RETRY_MAX      3
+
+// -----------------------------
+// 协议步骤门禁
+// -----------------------------
+typedef enum {
+    PROV_STEP_WAIT_BLE_OPEN = 0,  // 等待 {"statusBLE":0}
+    PROV_STEP_WAIT_NET_MODE,      // 等待 {"statusNet":0/1}
+    PROV_STEP_WAIT_WIFI_CFG,      // 等待 {"ssid":...,"password":...}（仅 WiFi 模式）
+    PROV_STEP_WAIT_WIFI_RESULT,   // 等待 WiFi 结果（IP / fail），期间不接收 MQTT
+    PROV_STEP_WAIT_MQTT_CFG,      // 等待 MQTT 配置 JSON
+    PROV_STEP_WAIT_BLE_CLOSE,     // 等待 {"statusBLE":1}
+    PROV_STEP_DONE,
+} prov_step_t;
+
+// 状态机主状态（需在 prov_set_step 使用前声明）
+// 静态全局变量默认 0 初始化，正好对应 PROV_STEP_WAIT_BLE_OPEN=0
+static prov_step_t s_step;
+
+static const char *prov_step_str(prov_step_t s) {
+    switch (s) {
+    case PROV_STEP_WAIT_BLE_OPEN:   return "WAIT_BLE_OPEN";
+    case PROV_STEP_WAIT_NET_MODE:   return "WAIT_NET_MODE";
+    case PROV_STEP_WAIT_WIFI_CFG:   return "WAIT_WIFI_CFG";
+    case PROV_STEP_WAIT_WIFI_RESULT:return "WAIT_WIFI_RESULT";
+    case PROV_STEP_WAIT_MQTT_CFG:   return "WAIT_MQTT_CFG";
+    case PROV_STEP_WAIT_BLE_CLOSE:  return "WAIT_BLE_CLOSE";
+    case PROV_STEP_DONE:           return "DONE";
+    default:                       return "UNKNOWN";
+    }
 }
 
-static void blufi_on_sync(void) {
-    // 只有在 sync 之后，才算协议栈准备好，但 Blufi 初始化通常在后面
-    // 确保协议栈同步成功，MAC 地址已就绪
-    
-
-    // 【核心修复】：必须在这里初始化 Blufi Profile！
-    // 只有当这里初始化完成后，底层才会触发 ESP_BLUFI_EVENT_INIT_FINISH，
-    // 此时再去调用 esp_blufi_adv_start() 就绝对安全了。
-    int rc;
-
-    // 1. 确保底层的蓝牙 MAC 地址已经生成并准备就绪
-    // 参数 0 表示首选 Public 地址 (如果硬件支持)，否则回退到 Random 地址
-    rc = ble_hs_util_ensure_addr(0);
-    if (rc != 0) {
-        BLUFI_ERROR("获取蓝牙 MAC 地址失败！错误码: %d", rc);
-        return;
-    }
-
-    BLUFI_INFO("NimBLE 底层同步完成，MAC 地址已就绪！");
-
-    // 2. 【核心】此时底层已经准备完美，可以安全地启动 Blufi 配网广播了
-    if (s_blufi_profile_inited) {
-        BLUFI_INFO("Blufi profile already inited, skip");
-        return;
-    }
-    s_blufi_profile_inited = true;
-    rc = esp_blufi_profile_init();
-    if (rc != 0) {
-        BLUFI_ERROR("Blufi profile 初始化失败！错误码: %d", rc);
+static void prov_set_step(prov_step_t next, const char *reason) {
+    if (s_step == next) return;
+    if (reason) {
+        PROV_I("STEP %s -> %s (%s)", prov_step_str(s_step), prov_step_str(next), reason);
     } else {
-        BLUFI_INFO("Blufi profile 初始化成功，开始广播配网信号...");
+        PROV_I("STEP %s -> %s", prov_step_str(s_step), prov_step_str(next));
     }
+    s_step = next;
 }
 
-// NimBLE 主机任务 (必须一直运行)
-static void bleprph_host_task(void *param) {
-    BLUFI_INFO("BLE Host Task Started");
-    nimble_port_run(); // 这个函数不会返回
-    nimble_port_freertos_deinit();
-}
-#endif
+// -----------------------------
+// BLE 相关全局
+// -----------------------------
+static uint8_t s_own_addr_type;
+static uint16_t s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
+static uint16_t s_tx_val_handle = 0;
+static bool s_notify_enabled = false;
 
-void blufi_send_mqtt_status(int status) {
-    char payload[64];
-    int len = snprintf(payload, sizeof(payload), "{\"statusMQTT\":%d}", status);
-    esp_blufi_send_custom_data((uint8_t *)payload, len);
-    ESP_LOGI(TAG, "Sent via BLE: %s", payload);
+// 配网窗口
+static esp_timer_handle_t s_prov_timer = NULL;
+static bool s_prov_window_open = false;
+
+// 状态机
+static int s_net_mode = -1; // 0=WiFi, 1=4G
+
+// Wi-Fi 配网过程状态
+static bool s_wifi_prov_connecting = false;
+static bool s_wifi_ignore_disconnect_once = false; // 主动 stop 造成的断开，忽略一次
+static int  s_wifi_prov_retry = 0;
+
+// MQTT 反馈（沿用原工程：收到 APP_EVENT_MQTT_PLAN_RECEIVED 视为成功）
+static bool s_mqtt_waiting = false;
+static esp_timer_handle_t s_mqtt_timer = NULL;
+
+// -----------------------------
+// 自定义 GATT UUID（128-bit）
+// 说明：请在小程序侧使用同样的 UUID 进行发现/读写。
+// -----------------------------
+// 注意：BLE_UUID128_INIT 传入的是“字节序（little-endian）”，以下对应的小程序侧 UUID 字符串是：
+// Service: 9e3c0001-2c6b-4f9b-8b5a-6f686e3d110a
+// RX(Write): 9e3c0002-2c6b-4f9b-8b5a-6f686e3d110a
+// TX(Notify): 9e3c0003-2c6b-4f9b-8b5a-6f686e3d110a
+static const ble_uuid128_t g_prov_svc_uuid =
+    BLE_UUID128_INIT(0x0a,0x11,0x3d,0x6e,0x68,0x6f,0x5a,0x8b,0x9b,0x4f,0x6b,0x2c,0x01,0x00,0x3c,0x9e);
+static const ble_uuid128_t g_prov_rx_uuid =
+    BLE_UUID128_INIT(0x0a,0x11,0x3d,0x6e,0x68,0x6f,0x5a,0x8b,0x9b,0x4f,0x6b,0x2c,0x02,0x00,0x3c,0x9e);
+static const ble_uuid128_t g_prov_tx_uuid =
+    BLE_UUID128_INIT(0x0a,0x11,0x3d,0x6e,0x68,0x6f,0x5a,0x8b,0x9b,0x4f,0x6b,0x2c,0x03,0x00,0x3c,0x9e);
+
+// -----------------------------
+// 前置声明
+// -----------------------------
+static void prov_start_advertising(void);
+static void prov_stop_advertising(void);
+static void prov_send_json_raw(const char *json_str);
+static void prov_send_kv_int(const char *key, int value);
+static void prov_handle_json(uint8_t *data, int len);
+
+// -----------------------------
+// 工具：安全拷贝 os_mbuf -> buf
+// -----------------------------
+static int om_to_buf(const struct os_mbuf *om, uint8_t *dst, int dst_sz) {
+    int len = OS_MBUF_PKTLEN(om);
+    if (len <= 0 || len >= dst_sz) return -1;
+    os_mbuf_copydata(om, 0, len, dst);
+    dst[len] = 0;
+    return len;
 }
 
-static void on_app_event(void *arg, esp_event_base_t event_base,
-                         int32_t event_id, void *event_data) {
-    if (event_base == APP_EVENTS && event_id == APP_EVENT_MQTT_PLAN_RECEIVED) {
-        blufi_send_mqtt_status(0);
-    }
-}
+// -----------------------------
+// BLE Notify：发送 JSON
+// -----------------------------
+static void prov_send_json_raw(const char *json_str) {
+    if (!json_str) return;
+    // 为了方便串口观察：无论是否真正发出，都打印要回复的 JSON
+    PROV_I("TX JSON: %s", json_str);
 
-static void send_json_status(const char *key, int value) {
-    if (!s_ble_is_connected) {
-        ESP_LOGD(TAG, "No BLE connection, skip sending: %s=%d", key, value);
+    if (s_conn_handle == BLE_HS_CONN_HANDLE_NONE) {
+        PROV_W("TX dropped: not connected");
         return;
     }
-    char payload[64];
-    int len = snprintf(payload, sizeof(payload), "{\"%s\":%d}", key, value);
-    esp_blufi_send_custom_data((uint8_t *)payload, len);
-    ESP_LOGI(TAG, "Reply: %s", payload);
-}
-
-
-// ---------------------------------------------------------
-//  自定义数据处理 (核心业务逻辑)
-// ---------------------------------------------------------
-static void handle_custom_data(uint8_t *data, int len) {
-    // data 不保证以 \0 结尾，不能直接用 %s 打印，避免越界读导致异常/断链
-    BLUFI_INFO("收到自定义数据 (Len: %d)", len);
-
-    // 1. 安全处理：确保是字符串
-    char *json_str = (char *)malloc(len + 1);
-    if (!json_str) {
-        BLUFI_ERROR("内存分配失败");
+    if (!s_notify_enabled) {
+        PROV_W("TX dropped: notify not enabled (need subscribe on TX characteristic)");
         return;
     }
-    memcpy(json_str, data, len);
-    json_str[len] = '\0';
-    
-    BLUFI_INFO("解析 JSON: %s", json_str);
+    if (!s_tx_val_handle) {
+        PROV_W("TX dropped: tx handle not ready");
+        return;
+    }
 
-    // 2. 使用 json_parser 进行解析
+    struct os_mbuf *om = ble_hs_mbuf_from_flat(json_str, strlen(json_str));
+    if (!om) return;
+    int rc = ble_gatts_notify_custom(s_conn_handle, s_tx_val_handle, om);
+    if (rc != 0) {
+        PROV_W("notify failed rc=%d", rc);
+    }
+}
+
+static void prov_send_kv_int(const char *key, int value) {
+    char payload[64];
+    int n = snprintf(payload, sizeof(payload), "{\"%s\":%d}", key, value);
+    if (n > 0) prov_send_json_raw(payload);
+}
+
+// -----------------------------
+// 配网窗口控制
+// -----------------------------
+static void prov_window_close_cb(void *arg) {
+    (void)arg;
+    s_prov_window_open = false;
+    PROV_I("Provision window closed");
+    prov_stop_advertising();
+
+    if (s_conn_handle != BLE_HS_CONN_HANDLE_NONE) {
+        // 主动断开
+        ble_gap_terminate(s_conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+    }
+}
+
+static void prov_window_open(void) {
+    s_prov_window_open = true;
+    s_step = PROV_STEP_WAIT_BLE_OPEN;
+    s_net_mode = -1;
+    s_wifi_prov_connecting = false;
+    s_wifi_prov_retry = 0;
+    s_wifi_ignore_disconnect_once = false;
+    s_mqtt_waiting = false;
+
+    if (s_prov_timer) esp_timer_stop(s_prov_timer);
+    esp_timer_start_once(s_prov_timer, (uint64_t)PROV_WINDOW_SEC * 1000000ULL);
+
+    PROV_I("Provision window open for %d sec (step=%s)", PROV_WINDOW_SEC, prov_step_str(s_step));
+    prov_start_advertising();
+}
+
+// -----------------------------
+// Wi-Fi 事件：仅用于返回 statusWiFi
+// -----------------------------
+static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data) {
+    (void)arg;
+
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        wifi_event_sta_disconnected_t *event = (wifi_event_sta_disconnected_t *)event_data;
+        int reason = event ? event->reason : -1;
+        PROV_I("Wi-Fi disconnected, reason=%d", reason);
+
+        // 主动 stop/disconnect 触发的断开事件，忽略一次，避免误报 statusWiFi=2
+        if (s_wifi_ignore_disconnect_once) {
+            s_wifi_ignore_disconnect_once = false;
+            return;
+        }
+
+        if (!s_wifi_prov_connecting) return;
+
+        // 密码错：直接失败
+        if (event && event->reason == WIFI_REASON_AUTH_FAIL) {
+            s_wifi_prov_connecting = false;
+            prov_set_step(PROV_STEP_WAIT_WIFI_CFG, "wifi auth fail");
+            prov_send_kv_int("statusWiFi", 2);
+            return;
+        }
+
+        // 其它原因：允许少量重试，避免瞬时断开就误判为失败
+        if (s_wifi_prov_retry < PROV_WIFI_RETRY_MAX) {
+            s_wifi_prov_retry++;
+            PROV_I("Wi-Fi provisioning retry %d/%d", s_wifi_prov_retry, PROV_WIFI_RETRY_MAX);
+            esp_wifi_connect();
+            return;
+        }
+
+        s_wifi_prov_connecting = false;
+        prov_set_step(PROV_STEP_WAIT_WIFI_CFG, "wifi retry exhausted");
+        prov_send_kv_int("statusWiFi", 2);
+    }
+}
+
+static void ip_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data) {
+    (void)arg;
+    (void)event_base;
+    (void)event_data;
+
+    if (event_id == IP_EVENT_STA_GOT_IP) {
+        if (s_wifi_prov_connecting) {
+            s_wifi_prov_connecting = false;
+            prov_set_step(PROV_STEP_WAIT_MQTT_CFG, "wifi got ip");
+            prov_send_kv_int("statusWiFi", 1);
+        }
+    }
+}
+
+// -----------------------------
+// MQTT 事件：返回 statusMQTT
+// -----------------------------
+static void mqtt_timeout_cb(void *arg) {
+    (void)arg;
+    if (!s_mqtt_waiting) return;
+    s_mqtt_waiting = false;
+    prov_send_kv_int("statusMQTT", 1);
+}
+
+static void on_app_event(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data) {
+    (void)arg;
+    (void)event_data;
+    if (event_base != APP_EVENTS) return;
+
+    if (event_id == APP_EVENT_MQTT_PLAN_RECEIVED) {
+        // 协议文档：连接成功（且已发送 init 并收到套餐 cmd）才算 0
+        if (s_mqtt_waiting) {
+            s_mqtt_waiting = false;
+            if (s_mqtt_timer) esp_timer_stop(s_mqtt_timer);
+            prov_send_kv_int("statusMQTT", 0);
+        }
+    } else if (event_id == APP_EVENT_MQTT_DISCONNECTED) {
+        if (s_mqtt_waiting) {
+            s_mqtt_waiting = false;
+            if (s_mqtt_timer) esp_timer_stop(s_mqtt_timer);
+            prov_send_kv_int("statusMQTT", 1);
+        }
+    }
+}
+
+// -----------------------------
+// GATT Access 回调：接收 JSON
+// -----------------------------
+static int gatt_access_cb(uint16_t conn_handle, uint16_t attr_handle,
+                          struct ble_gatt_access_ctxt *ctxt, void *arg) {
+    (void)conn_handle;
+    (void)attr_handle;
+    (void)arg;
+
+    if (ctxt->op != BLE_GATT_ACCESS_OP_WRITE_CHR) {
+        return BLE_ATT_ERR_UNLIKELY;
+    }
+
+    if (!s_prov_window_open) {
+        return BLE_ATT_ERR_WRITE_NOT_PERMITTED;
+    }
+
+    uint8_t buf[PROV_JSON_MAX_LEN + 1];
+    int len = om_to_buf(ctxt->om, buf, sizeof(buf));
+    if (len <= 0) {
+        return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+    }
+
+    prov_handle_json(buf, len);
+    return 0;
+}
+
+static const struct ble_gatt_svc_def gatt_svcs[] = {
+    {
+        .type = BLE_GATT_SVC_TYPE_PRIMARY,
+        .uuid = &g_prov_svc_uuid.u,
+        .characteristics = (struct ble_gatt_chr_def[]) {
+            {
+                .uuid = &g_prov_rx_uuid.u,
+                .access_cb = gatt_access_cb,
+                .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP,
+            },
+            {
+                .uuid = &g_prov_tx_uuid.u,
+                // NimBLE 要求 characteristic 必须提供 access_cb（即使仅用于 notify），否则 ble_gatts_count_cfg 可能返回 EINVAL。
+                .access_cb = gatt_access_cb,
+                .val_handle = &s_tx_val_handle,
+                .flags = BLE_GATT_CHR_F_NOTIFY,
+            },
+            {0}
+        },
+    },
+    {0},
+};
+
+// -----------------------------
+// JSON 处理（步骤门禁）
+// -----------------------------
+static void prov_handle_json(uint8_t *data, int len) {
+    // data 已确保以 '\0' 结尾
+    PROV_I("RX JSON (len=%d, step=%s, net_mode=%d): %s", len, prov_step_str(s_step), s_net_mode, (char *)data);
+
     jparse_ctx_t jctx;
-    if (json_parse_start(&jctx, json_str, len) == 0) {
-        int val = 0;
-      
-        
-        // 1. statusBLE (握手/关闭)
-        if (json_obj_get_int(&jctx, "statusBLE", &val) == 0) {
-            ESP_LOGI(TAG, "Step 1/5: StatusBLE Check: %d", val);
-            send_json_status("statusBLE", val);
-            if (val == 1) {
-                // 收到关闭请求，断开蓝牙
-                ESP_LOGW(TAG, "Step 5: Closing BLE connection...");
-                vTaskDelay(pdMS_TO_TICKS(1000)); // 给一点时间让回复发出去
-                esp_blufi_disconnect(); 
+    if (json_parse_start(&jctx, (char *)data, len) != 0) {
+        return;
+    }
+
+    int ival = 0;
+
+    // Step 1/5: statusBLE
+    if (json_obj_get_int(&jctx, "statusBLE", &ival) == 0) {
+        if (ival == 0) {
+            if (s_step != PROV_STEP_WAIT_BLE_OPEN) {
+                PROV_W("step mismatch for statusBLE=0, cur=%s", prov_step_str(s_step));
+                json_parse_end(&jctx);
+                return;
             }
+            prov_send_kv_int("statusBLE", 0);
+            prov_set_step(PROV_STEP_WAIT_NET_MODE, "statusBLE open");
+            json_parse_end(&jctx);
+            return;
+        }
+        if (ival == 1) {
+            if (s_step != PROV_STEP_WAIT_BLE_CLOSE) {
+                PROV_W("step mismatch for statusBLE=1, cur=%s", prov_step_str(s_step));
+                json_parse_end(&jctx);
+                return;
+            }
+            prov_send_kv_int("statusBLE", 1);
+            prov_set_step(PROV_STEP_DONE, "statusBLE close");
+            // 提前关闭配网窗口：停止广播并停止计时器
+            s_prov_window_open = false;
+            if (s_prov_timer) esp_timer_stop(s_prov_timer);
+            prov_stop_advertising();
+            // 主动断开 BLE（对齐文档“请求关闭”）
+            if (s_conn_handle != BLE_HS_CONN_HANDLE_NONE) {
+                ble_gap_terminate(s_conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+            }
+            json_parse_end(&jctx);
+            return;
+        }
+    }
+
+    // Step 2: statusNet
+    if (json_obj_get_int(&jctx, "statusNet", &ival) == 0) {
+        if (s_step != PROV_STEP_WAIT_NET_MODE) {
+            PROV_W("step mismatch for statusNet, cur=%s", prov_step_str(s_step));
+            json_parse_end(&jctx);
+            return;
         }
 
-        // 2. statusNet (配网模式)
-        if (json_obj_get_int(&jctx, "statusNet", &val) == 0) {
-            ESP_LOGI(TAG, "Step 2: Set Net Mode: %d", val);
-            // 保存模式到 NVS
-            net_config_t cfg;
-            if (app_storage_load_net_config(&cfg) != ESP_OK) memset(&cfg, 0, sizeof(cfg));
-            cfg.mode = val;
-            app_storage_save_net_config(&cfg);
-            
-            // 返回确认
-            send_json_status("statusNet", 1);
-            // 通过事件通知网络管理器切换模式
-            app_events_post_net_mode_request(val);
-        }
+        s_net_mode = ival;
+        net_config_t cfg;
+        if (app_storage_load_net_config(&cfg) != ESP_OK) memset(&cfg, 0, sizeof(cfg));
+        cfg.mode = s_net_mode;
+        app_storage_save_net_config(&cfg);
 
-        // 4. MQTT 配置
-        char mqtt_server_buf[64] = {0};
-        char username_buf[64] = {0};
-        char password_buf[64] = {0};
+        prov_send_kv_int("statusNet", 1);
+        app_events_post_net_mode_request(s_net_mode);
 
-        // 解析 mqttserver: "IP:Port"
-        if (json_obj_get_string(&jctx, "mqttserver", mqtt_server_buf, sizeof(mqtt_server_buf)) == 0) {
-            ESP_LOGI(TAG, "[Step 4] Recv MQTT Config: %s", mqtt_server_buf);
-            
-            // 获取用户名和密码
-            json_obj_get_string(&jctx, "username", username_buf, sizeof(username_buf));
-            json_obj_get_string(&jctx, "password", password_buf, sizeof(password_buf));
-
-            // 保存到 NVS
-            net_config_t cfg;
-            if (app_storage_load_net_config(&cfg) != ESP_OK) memset(&cfg, 0, sizeof(cfg));
-
-            // 解析 IP 和 Port
-            char *colon = strchr(mqtt_server_buf, ':');
-            if (colon) {
-                *colon = '\0'; // 截断字符串
-                strncpy(cfg.mqtt_host, mqtt_server_buf, sizeof(cfg.mqtt_host) - 1);
-                cfg.mqtt_port = atoi(colon + 1);
-            } else {
-                strncpy(cfg.mqtt_host, mqtt_server_buf, sizeof(cfg.mqtt_host) - 1);
-                cfg.mqtt_port = 1883; // 默认端口
-            }
-
-            strncpy(cfg.username, username_buf, sizeof(cfg.username) - 1);
-            strncpy(cfg.password_mqtt, password_buf, sizeof(cfg.password_mqtt) - 1);
-
-            // 构造完整 URL: mqtt://ip:port
-            snprintf(cfg.full_url, sizeof(cfg.full_url), "mqtt://%s:%d", cfg.mqtt_host, cfg.mqtt_port);
-
-
-            // 标记：下次连接 MQTT 时需要发送 Init 包
-            app_storage_set_pending_init(1);
-            ESP_LOGI(TAG, "Config Saved. Flag 'pending_init' set to 1.");
-
-            app_storage_save_net_config(&cfg);
-            ESP_LOGI(TAG, "Config Saved. Posting MQTT config update event...");
-            app_events_post_mqtt_config_updated();
+        if (s_net_mode == 0) {
+            prov_set_step(PROV_STEP_WAIT_WIFI_CFG, "net mode=wifi");
+        } else {
+            prov_set_step(PROV_STEP_WAIT_MQTT_CFG, "net mode=4g");
         }
 
         json_parse_end(&jctx);
+        return;
     }
-    free(json_str);
 
-}
-
-
-
-
-// ---------------------------------------------------------
-//  Wi-Fi 事件回调
-// ---------------------------------------------------------
-static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
-    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
-        wifi_event_sta_disconnected_t* event = (wifi_event_sta_disconnected_t*) event_data;
-        gl_sta_connected = false;
-        
-        // 1. 报告失败给 App
-        send_json_status("statusWiFi", 2); 
-        
-
-        // 2. 使用 Blufi 标准报告失败信息 (可以带上具体的 Reason)
-        if (s_ble_is_connected) {
-            esp_blufi_extra_info_t info = {0};
-            // 这里的 reason 可以让手机 App 知道是密码错还是找不到 SSID
-            esp_blufi_send_wifi_conn_report(WIFI_MODE_STA, ESP_BLUFI_STA_CONN_FAIL, event->reason, &info);
+    // Step 3: WiFi 配置（仅 WiFi 模式）
+    char ssid[33] = {0};
+    char password[65] = {0};
+    int has_ssid = (json_obj_get_string(&jctx, "ssid", ssid, sizeof(ssid)) == 0);
+    int has_pwd  = (json_obj_get_string(&jctx, "password", password, sizeof(password)) == 0);
+    // 注意：MQTT 配置同样包含字段 "password"，
+    // WiFi 配置必须带 ssid 才认为是 WiFi 配置，避免把 MQTT JSON 误判成 WiFi JSON。
+    if (has_ssid) {
+        if (s_step != PROV_STEP_WAIT_WIFI_CFG || s_net_mode != 0) {
+            PROV_W("step mismatch for wifi cfg, cur=%s net_mode=%d", prov_step_str(s_step), s_net_mode);
+            json_parse_end(&jctx);
+            return;
         }
-        // 3. 策略性重连（避免密码错误时的无限死循环）
-        if (event->reason != WIFI_REASON_AUTH_FAIL) {
-            esp_wifi_connect();
+        if (!has_ssid || !has_pwd) {
+            PROV_W("wifi cfg missing field: has_ssid=%d has_pwd=%d", has_ssid, has_pwd);
+            json_parse_end(&jctx);
+            return;
         }
-    } 
-    else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
-        gl_sta_connected = true;
-        ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
-        
-        // 只有拿到 IP 才算真正的“成功”
-        send_json_status("statusWiFi", 1);
-        
-        esp_blufi_extra_info_t info = {0};
-        esp_blufi_send_wifi_conn_report(WIFI_MODE_STA, ESP_BLUFI_STA_CONN_SUCCESS, 0, &info);
-        
-        ESP_LOGI(TAG, "Connected! IP: " IPSTR, IP2STR(&event->ip_info.ip));
-    }
-}
 
-static void ip_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
-    if (event_id == IP_EVENT_STA_GOT_IP) {
-        wifi_mode_t mode;
-        esp_wifi_get_mode(&mode);
-        esp_blufi_extra_info_t info = {0};
-        esp_blufi_send_wifi_conn_report(mode, ESP_BLUFI_STA_CONN_SUCCESS, 0, &info);
-        BLUFI_INFO("Wi-Fi 连接成功，已反馈给 APP");
-    }
-}
+        // 保存到 NVS
+        net_config_t cfg;
+        if (app_storage_load_net_config(&cfg) != ESP_OK) memset(&cfg, 0, sizeof(cfg));
+        cfg.mode = 0;
+        strncpy(cfg.ssid, ssid, sizeof(cfg.ssid) - 1);
+        strncpy(cfg.password, password, sizeof(cfg.password) - 1);
+        app_storage_save_net_config(&cfg);
 
+        // 开始连接 Wi-Fi：statusWiFi=0
+        s_wifi_prov_connecting = true;
+        s_wifi_prov_retry = 0;
+        prov_set_step(PROV_STEP_WAIT_WIFI_RESULT, "wifi connect start");
+        prov_send_kv_int("statusWiFi", 0);
 
+        wifi_config_t sta_config = {0};
+        strncpy((char *)sta_config.sta.ssid, ssid, sizeof(sta_config.sta.ssid) - 1);
+        strncpy((char *)sta_config.sta.password, password, sizeof(sta_config.sta.password) - 1);
 
-
-// ---------------------------------------------------------
-//  Blufi 回调处理
-// ---------------------------------------------------------
-static void example_event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_param_t *param) {
-    switch (event) {
-    case ESP_BLUFI_EVENT_INIT_FINISH:
-        esp_blufi_adv_start();
-        BLUFI_INFO("Blufi 初始化完成，开始广播");
-        break;
-    case ESP_BLUFI_EVENT_BLE_CONNECT:
-        BLUFI_INFO("蓝牙已连接");
-        s_ble_is_connected = true;
-        // 连接后停止广播，减少异常边缘情况（官方例程同样如此）
-        esp_blufi_adv_stop();
-        blufi_security_init();
-        break;
-    case ESP_BLUFI_EVENT_BLE_DISCONNECT:
-        BLUFI_INFO("蓝牙已断开");
-        s_ble_is_connected = false;
-        blufi_security_deinit();
-        esp_blufi_adv_start(); 
-        break;
-    case ESP_BLUFI_EVENT_RECV_STA_SSID:
-        // 1. 清零并拷贝，注意防止越界
-        memset(&sta_config, 0, sizeof(sta_config));
-        memset(sta_config.sta.ssid, 0, sizeof(sta_config.sta.ssid));
-        uint8_t ssid_len = (param->sta_ssid.ssid_len < 32) ? param->sta_ssid.ssid_len : 31;
-        memcpy(sta_config.sta.ssid, param->sta_ssid.ssid, ssid_len);
-        
-        send_json_status("statusWiFi", 0);
-        break;
-    case ESP_BLUFI_EVENT_RECV_STA_PASSWD:
-        // 2. 同样的清零并拷贝
-        memset(sta_config.sta.password, 0, sizeof(sta_config.sta.password));
-        uint8_t pwd_len = (param->sta_passwd.passwd_len < 64) ? param->sta_passwd.passwd_len : 63;
-        memcpy(sta_config.sta.password, param->sta_passwd.passwd, pwd_len);
-        BLUFI_INFO("收到 Password");
-        break;
-    case ESP_BLUFI_EVENT_RECV_CUSTOM_DATA:
-        // *** 修正点 ***
-        handle_custom_data(param->custom_data.data, param->custom_data.data_len);
-        break;
-    case ESP_BLUFI_EVENT_REQ_CONNECT_TO_AP:
-        
-        BLUFI_INFO("收到连接请求，开始连接 Wi-Fi");
-        // 将 Blufi 收到的临时配置保存到我们的持久化结构体中
-        net_config_t save_cfg;
-        // 1. 先读取现有配置（防止覆盖掉 MQTT 地址）
-        if (app_storage_load_net_config(&save_cfg) != ESP_OK) {
-            memset(&save_cfg, 0, sizeof(net_config_t));
-        }
-        
-        // 2. 更新 SSID 和 密码
-        // 注意：sta_config 是 static 变量，在前面 RECV_SSID/PASSWD 事件中已被赋值
-        strncpy(save_cfg.ssid, (char *)sta_config.sta.ssid, sizeof(save_cfg.ssid) - 1);
-        strncpy(save_cfg.password, (char *)sta_config.sta.password, sizeof(save_cfg.password) - 1);
-        save_cfg.mode = 0; // 强制标记为 WiFi 模式
-
-        // 3. 保存到 NVS
-        esp_err_t save_err = app_storage_save_net_config(&save_cfg);
-        if (save_err == ESP_OK) {
-            BLUFI_INFO("Wi-Fi 配置已保存到 NVS");
-        } else {
-            BLUFI_ERROR("Wi-Fi 配置保存失败: %s", esp_err_to_name(save_err));
-        }
-        esp_wifi_disconnect();
+        // 关键：避免 “sta is connecting, cannot set config”
+        s_wifi_ignore_disconnect_once = true;
+        esp_wifi_stop();
         esp_wifi_set_config(WIFI_IF_STA, &sta_config);
         esp_wifi_start();
-
         esp_err_t err = esp_wifi_connect();
         if (err != ESP_OK) {
-            BLUFI_ERROR("Wi-Fi 连接启动失败! 错误码: %s", esp_err_to_name(err));
-            // 如果你之前没加 esp_wifi_start，这里原本会打印 ESP_ERR_WIFI_NOT_STARTED
+            PROV_E("esp_wifi_connect failed: %s", esp_err_to_name(err));
         }
-        break;
-    case ESP_BLUFI_EVENT_REPORT_ERROR:
-        BLUFI_ERROR("Blufi 错误代码: %d", param->report_error.state);
-        esp_blufi_send_error_info(param->report_error.state);
-        break;
+
+        json_parse_end(&jctx);
+        return;
+    }
+
+    // Step 4: MQTT 配置
+    char mqtt_server_buf[64] = {0};
+    if (json_obj_get_string(&jctx, "mqttserver", mqtt_server_buf, sizeof(mqtt_server_buf)) == 0) {
+        if (s_step != PROV_STEP_WAIT_MQTT_CFG) {
+            PROV_W("step mismatch for mqtt cfg, cur=%s", prov_step_str(s_step));
+            json_parse_end(&jctx);
+            return;
+        }
+
+        char username_buf[64] = {0};
+        char password_buf[64] = {0};
+        json_obj_get_string(&jctx, "username", username_buf, sizeof(username_buf));
+        json_obj_get_string(&jctx, "password", password_buf, sizeof(password_buf));
+
+        net_config_t cfg;
+        if (app_storage_load_net_config(&cfg) != ESP_OK) memset(&cfg, 0, sizeof(cfg));
+
+        char *colon = strchr(mqtt_server_buf, ':');
+        if (colon) {
+            *colon = '\0';
+            strncpy(cfg.mqtt_host, mqtt_server_buf, sizeof(cfg.mqtt_host) - 1);
+            cfg.mqtt_port = atoi(colon + 1);
+        } else {
+            strncpy(cfg.mqtt_host, mqtt_server_buf, sizeof(cfg.mqtt_host) - 1);
+            cfg.mqtt_port = 1883;
+        }
+
+        strncpy(cfg.username, username_buf, sizeof(cfg.username) - 1);
+        strncpy(cfg.password_mqtt, password_buf, sizeof(cfg.password_mqtt) - 1);
+        snprintf(cfg.full_url, sizeof(cfg.full_url), "mqtt://%s:%d", cfg.mqtt_host, cfg.mqtt_port);
+
+        app_storage_save_net_config(&cfg);
+        app_storage_set_pending_init(1);
+        app_events_post_mqtt_config_updated();
+
+        // 等待 MQTT 结果反馈
+        s_mqtt_waiting = true;
+        if (s_mqtt_timer) {
+            esp_timer_stop(s_mqtt_timer);
+            esp_timer_start_once(s_mqtt_timer, 20000000ULL); // 20s 超时
+        }
+
+        prov_set_step(PROV_STEP_WAIT_BLE_CLOSE, "mqtt cfg received");
+        json_parse_end(&jctx);
+        return;
+    }
+
+    json_parse_end(&jctx);
+}
+
+// -----------------------------
+// GAP 事件
+// -----------------------------
+static int gap_event_cb(struct ble_gap_event *event, void *arg) {
+    (void)arg;
+
+    switch (event->type) {
+    case BLE_GAP_EVENT_CONNECT:
+        if (event->connect.status == 0) {
+            s_conn_handle = event->connect.conn_handle;
+            s_notify_enabled = false; // 等待 subscribe 事件
+            PROV_I("BLE connected; conn_handle=%d", s_conn_handle);
+        } else {
+            PROV_W("BLE connect failed; status=%d", event->connect.status);
+            s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
+            if (s_prov_window_open) prov_start_advertising();
+        }
+        return 0;
+
+    case BLE_GAP_EVENT_DISCONNECT:
+        PROV_I("BLE disconnected; reason=%d", event->disconnect.reason);
+        s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
+        s_notify_enabled = false;
+        prov_set_step(PROV_STEP_WAIT_BLE_OPEN, "ble disconnected"); // 下次连接重新走流程
+        s_net_mode = -1;
+        s_wifi_prov_connecting = false;
+        s_wifi_prov_retry = 0;
+        s_wifi_ignore_disconnect_once = false;
+        s_mqtt_waiting = false;
+        if (s_mqtt_timer) esp_timer_stop(s_mqtt_timer);
+
+        if (s_prov_window_open) prov_start_advertising();
+        return 0;
+
+    case BLE_GAP_EVENT_SUBSCRIBE:
+        if (event->subscribe.attr_handle == s_tx_val_handle) {
+            s_notify_enabled = event->subscribe.cur_notify;
+            PROV_I("subscribe tx notify=%d", s_notify_enabled);
+        }
+        return 0;
+
+    case BLE_GAP_EVENT_MTU:
+        PROV_I("mtu update; conn_handle=%d mtu=%d", event->mtu.conn_handle, event->mtu.value);
+        return 0;
+
     default:
-        break;
+        return 0;
     }
 }
 
-static esp_blufi_callbacks_t example_callbacks = {
-    .event_cb = example_event_callback,
-    .negotiate_data_handler = blufi_dh_negotiate_data_handler,
-    .encrypt_func = blufi_aes_encrypt,
-    .decrypt_func = blufi_aes_decrypt,
-    .checksum_func = blufi_crc_checksum,
-};
+// -----------------------------
+// Advertising
+// -----------------------------
+static void prov_start_advertising(void) {
+    if (!s_prov_window_open) return;
+    if (ble_gap_adv_active()) return;
 
+    struct ble_gap_adv_params adv_params;
+    memset(&adv_params, 0, sizeof(adv_params));
+    adv_params.conn_mode = BLE_GAP_CONN_MODE_UND;
+    adv_params.disc_mode = BLE_GAP_DISC_MODE_GEN;
 
+    struct ble_hs_adv_fields fields;
+    memset(&fields, 0, sizeof(fields));
+    fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
 
+    const char *name = ble_svc_gap_device_name();
+    fields.name = (uint8_t *)name;
+    fields.name_len = strlen(name);
+    fields.name_is_complete = 1;
 
-// ---------------------------------------------------------
-//  对外接口实现
-// ---------------------------------------------------------
+    int rc = ble_gap_adv_set_fields(&fields);
+    if (rc != 0) {
+        PROV_E("ble_gap_adv_set_fields rc=%d", rc);
+        return;
+    }
+
+    rc = ble_gap_adv_start(s_own_addr_type, NULL, BLE_HS_FOREVER, &adv_params, gap_event_cb, NULL);
+    if (rc != 0) {
+        PROV_E("ble_gap_adv_start rc=%d", rc);
+        return;
+    }
+    PROV_I("advertising started");
+}
+
+static void prov_stop_advertising(void) {
+    if (ble_gap_adv_active()) {
+        ble_gap_adv_stop();
+    }
+}
+
+// -----------------------------
+// NimBLE 回调
+// -----------------------------
+static void on_reset(int reason) {
+    PROV_E("NimBLE reset; reason=%d", reason);
+}
+
+static void on_sync(void) {
+    int rc = ble_hs_id_infer_auto(0, &s_own_addr_type);
+    if (rc != 0) {
+        PROV_E("ble_hs_id_infer_auto rc=%d", rc);
+        return;
+    }
+    prov_window_open();
+}
+
+static void host_task(void *param) {
+    (void)param;
+    PROV_I("BLE host task started");
+    nimble_port_run();
+    nimble_port_freertos_deinit();
+}
+
+// -----------------------------
+// 对外接口
+// -----------------------------
 esp_err_t blufi_custom_init(void) {
-    esp_err_t ret;
-
+    esp_err_t ret = ESP_OK;
+    PROV_I("blufi_custom_init: start (BLE JSON provisioning, %ds window)", PROV_WINDOW_SEC);
+    // 注册 Wi-Fi/IP 事件，用于 statusWiFi
     ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &ip_event_handler, NULL));
+
+    // MQTT 状态反馈事件
     ESP_ERROR_CHECK(esp_event_handler_register(APP_EVENTS, APP_EVENT_MQTT_PLAN_RECEIVED, &on_app_event, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_register(APP_EVENTS, APP_EVENT_MQTT_DISCONNECTED, &on_app_event, NULL));
 
-    // 0. 【关键】先注册 Blufi 回调，确保 NimBLE sync 回调里 profile_init 后能正确派发事件
-    ret = esp_blufi_register_callbacks(&example_callbacks);
-    if (ret) return ret;
+    // 配网窗口 timer
+    if (!s_prov_timer) {
+        esp_timer_create_args_t tcfg = {
+            .callback = &prov_window_close_cb,
+            .arg = NULL,
+            .dispatch_method = ESP_TIMER_TASK,
+            .name = "prov_win",
+            .skip_unhandled_events = true,
+        };
+        ESP_ERROR_CHECK(esp_timer_create(&tcfg, &s_prov_timer));
+    }
 
-    // 1. 控制器层初始化 (Controller)
-#if CONFIG_BT_CONTROLLER_ENABLED || !CONFIG_BT_NIMBLE_ENABLED
-    ESP_ERROR_CHECK(esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT)); // 释放经典蓝牙内存
+    // MQTT 超时 timer（可选）
+    if (!s_mqtt_timer) {
+        esp_timer_create_args_t mcfg = {
+            .callback = &mqtt_timeout_cb,
+            .arg = NULL,
+            .dispatch_method = ESP_TIMER_TASK,
+            .name = "mqtt_to",
+            .skip_unhandled_events = true,
+        };
+        ESP_ERROR_CHECK(esp_timer_create(&mcfg, &s_mqtt_timer));
+    }
 
+    // 初始化 BLE Controller（NimBLE Host 依赖 Controller 提供 HCI）
+    // 之前 BLUFI 版本这里做过 controller init/enable；去掉 BLUFI 后仍需保留。
+#if CONFIG_BT_CONTROLLER_ENABLED
+    ESP_ERROR_CHECK(esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT));
     esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
     ret = esp_bt_controller_init(&bt_cfg);
-    if (ret) { BLUFI_ERROR("BT Controller Init Failed"); return ret; }
-
+    if (ret != ESP_OK) {
+        PROV_E("esp_bt_controller_init failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
     ret = esp_bt_controller_enable(ESP_BT_MODE_BLE);
-    if (ret) { BLUFI_ERROR("BT Controller Enable Failed"); return ret; }
+    if (ret != ESP_OK) {
+        PROV_E("esp_bt_controller_enable failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
 #endif
 
-    // 2. 主机层初始化 (Host Stack)
-#ifdef CONFIG_BT_BLUEDROID_ENABLED
-    // ---> Bluedroid 路径
-    ret = esp_bluedroid_init();
-    if (ret) return ret;
-    ret = esp_bluedroid_enable();
-    if (ret) return ret;
-    BLUFI_INFO("Bluedroid Stack Initialized");
-#endif
-
-#ifdef CONFIG_BT_NIMBLE_ENABLED
-    // ---> NimBLE 路径
+    // 初始化 NimBLE
+    PROV_I("init nimble host...");
     ret = esp_nimble_init();
-    if (ret) { BLUFI_ERROR("NimBLE init failed");return ret; }
-
-    // (A) 配置回调
-    ble_hs_cfg.reset_cb = blufi_on_reset;
-    ble_hs_cfg.sync_cb = blufi_on_sync;
-    ble_hs_cfg.gatts_register_cb = esp_blufi_gatt_svr_register_cb;
-    ble_hs_cfg.store_status_cb = ble_store_util_status_rr;
-    ble_hs_cfg.sm_io_cap = 4; // DisplayOnly
-    #ifdef CONFIG_EXAMPLE_BONDING
-    ble_hs_cfg.sm_bonding = 1;
-    #endif
-
-    // (B) 初始化 Blufi GATT 服务
-    ret = esp_blufi_gatt_svr_init(); 
-    if (ret) {
-        BLUFI_ERROR("Blufi GATT Svr init failed");
+    if (ret != ESP_OK) {
+        PROV_E("esp_nimble_init failed: %s", esp_err_to_name(ret));
         return ret;
     }
 
-    // (C) 设置默认设备名
-    ret = ble_svc_gap_device_name_set("BLUFI_DEVICE");
-    if (ret) return ret;
+    ble_hs_cfg.reset_cb = on_reset;
+    ble_hs_cfg.sync_cb = on_sync;
+    ble_hs_cfg.store_status_cb = ble_store_util_status_rr;
 
-    // (C2) 初始化 NimBLE Store（官方例程会调用，缺失时可能影响配对/绑定相关行为）
+    // 设备名（用于广播）
+    ble_svc_gap_device_name_set("WATER_PROV");
+
+    // 初始化默认 GAP/GATT 服务（0x1800/0x1801）
+    ble_svc_gap_init();
+    ble_svc_gatt_init();
+
+    // 注册自定义服务
+    int rc = ble_gatts_count_cfg(gatt_svcs);
+    if (rc != 0) {
+        PROV_E("ble_gatts_count_cfg failed rc=%d", rc);
+        return ESP_FAIL;
+    }
+    rc = ble_gatts_add_svcs(gatt_svcs);
+    if (rc != 0) {
+        PROV_E("ble_gatts_add_svcs failed rc=%d", rc);
+        return ESP_FAIL;
+    }
+
+    // 初始化 store（即使不做 bonding，也建议初始化，避免部分行为差异）
     ble_store_config_init();
 
-    // (D) 初始化 BTC 任务 ***
-    esp_blufi_btc_init();
+    // 启动 host task（使用 ESP-IDF 封装，避免与 esp_nimble_init 初始化流程冲突）
+    PROV_I("enable nimble host task...");
+    ret = esp_nimble_enable(host_task);
+    if (ret != ESP_OK) {
+        PROV_E("esp_nimble_enable failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
 
-    // (E) 启动 NimBLE Host 任务
-    ret = esp_nimble_enable(bleprph_host_task);
-    if (ret) return ret;
-    
-    BLUFI_INFO("NimBLE Stack & BTC Task Initialized");
-#endif
-
-    // // 4. 启动 Blufi
-    // ret = esp_blufi_profile_init();
-    // return ret;
+    PROV_I("BLE provisioning service init done");
     return ESP_OK;
 }
 
 void blufi_custom_deinit(void) {
-    esp_blufi_profile_deinit();
+    // 停止广播/断开连接
+    s_prov_window_open = false;
+    prov_stop_advertising();
+    if (s_conn_handle != BLE_HS_CONN_HANDLE_NONE) {
+        ble_gap_terminate(s_conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+    }
 
-#ifdef CONFIG_BT_BLUEDROID_ENABLED
-    esp_bluedroid_disable();
-    esp_bluedroid_deinit();
-#endif
-
-// 在 ESP-IDF 的 NimBLE 架构中，实现“优雅且安全”的 Deinit（反初始化）比初始化要麻烦得多。
-// #ifdef CONFIG_BT_NIMBLE_ENABLED
-//     esp_nimble_deinit();
-// #endif
-
-#if CONFIG_BT_CONTROLLER_ENABLED || !CONFIG_BT_NIMBLE_ENABLED
-    esp_bt_controller_disable();
-    esp_bt_controller_deinit();
-#endif
+    if (s_prov_timer) esp_timer_stop(s_prov_timer);
+    if (s_mqtt_timer) esp_timer_stop(s_mqtt_timer);
 }
 
-void blufi_send_custom_result(bool success, const char* msg) {
+void blufi_send_custom_result(bool success, const char *msg) {
+    // 保留旧接口：简单封装为 JSON 返回
     if (!msg) msg = "";
-    int len = strlen(msg);
-    // 分配 buffer: 1 byte status + message
-    uint8_t *data = (uint8_t*)malloc(len + 1);
-    
-    if (data) {
-        data[0] = success ? 0x01 : 0x00;
-        memcpy(data + 1, msg, len);
-        
-        esp_blufi_send_custom_data(data, len + 1);
-        free(data);
-    }
+    char payload[PROV_JSON_MAX_LEN];
+    snprintf(payload, sizeof(payload), "{\"ok\":%d,\"msg\":\"%s\"}", success ? 1 : 0, msg);
+    prov_send_json_raw(payload);
+}
+
+void blufi_send_mqtt_status(int status) {
+    // 保留旧接口：按文档字段名 statusMQTT
+    prov_send_kv_int("statusMQTT", status);
 }
