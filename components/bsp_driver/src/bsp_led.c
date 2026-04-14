@@ -20,10 +20,15 @@ static const char *TAG = "BSP_LED";
 // --- 状态缓存 ---
 static led_alarm_state_t s_alarm_states[5] = {LED_ALARM_OFF}; // index 1~4 对应 LED1~4
 static led_work_mode_t s_work_mode = LED_MODE_STANDBY;
+static bool s_i2c_ready = false;
+static bool s_anim_task_started = false;
 
 // I2C 写入函数
-static void write_tm1650(uint8_t addr_7bit, uint8_t data) {
-    i2c_master_write_to_device(I2C_MASTER_NUM, addr_7bit, &data, 1, pdMS_TO_TICKS(10));
+static esp_err_t write_tm1650(uint8_t addr_7bit, uint8_t data) {
+    if (!s_i2c_ready) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    return i2c_master_write_to_device(I2C_MASTER_NUM, addr_7bit, &data, 1, pdMS_TO_TICKS(10));
 }
 
 // =========================================================
@@ -104,15 +109,15 @@ static void led_animation_task(void *arg) {
         // --------------------------------------------------
         // 3. 将计算好的两组数据刷入硬件
         // --------------------------------------------------
-        write_tm1650(TM1650_CMD_DIG1, dig1);
-        write_tm1650(TM1650_CMD_DIG2, dig2);
+        (void)write_tm1650(TM1650_CMD_DIG1, dig1);
+        (void)write_tm1650(TM1650_CMD_DIG2, dig2);
     }
 }
 
 // =========================================================
 // 外部 API 实现
 // =========================================================
-void bsp_led_init(void) {
+static void led_i2c_init_task(void *arg) {
     i2c_config_t conf = {
         .mode = I2C_MODE_MASTER,
         .sda_io_num = I2C_MASTER_SDA_IO,
@@ -121,19 +126,42 @@ void bsp_led_init(void) {
         .scl_pullup_en = GPIO_PULLUP_ENABLE,
         .master.clk_speed = I2C_MASTER_FREQ_HZ,
     };
-    i2c_param_config(I2C_MASTER_NUM, &conf);
-    i2c_driver_install(I2C_MASTER_NUM, conf.mode, 0, 0, 0);
 
-    // 开启显示，设置 3 级亮度 (0x31)
-    write_tm1650(TM1650_CMD_SYS_CTRL, 0x31); 
-    
-    // 清空数据
-    write_tm1650(TM1650_CMD_DIG1, 0x00);
-    write_tm1650(TM1650_CMD_DIG2, 0x00);
+    esp_err_t err = i2c_param_config(I2C_MASTER_NUM, &conf);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "i2c_param_config failed: %s", esp_err_to_name(err));
+        vTaskDelete(NULL);
+        return;
+    }
 
-    // 启动后台动画任务
-    xTaskCreate(led_animation_task, "led_anim", 2048, NULL, 5, NULL);
+    err = i2c_driver_install(I2C_MASTER_NUM, conf.mode, 0, 0, 0);
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+        ESP_LOGE(TAG, "i2c_driver_install failed: %s", esp_err_to_name(err));
+        vTaskDelete(NULL);
+        return;
+    }
+
+    s_i2c_ready = true;
+
+    (void)write_tm1650(TM1650_CMD_SYS_CTRL, 0x31);
+    (void)write_tm1650(TM1650_CMD_DIG1, 0x00);
+    (void)write_tm1650(TM1650_CMD_DIG2, 0x00);
+
+    if (!s_anim_task_started) {
+        s_anim_task_started = true;
+        xTaskCreatePinnedToCore(led_animation_task, "led_anim", 2048, NULL, 5, NULL, 1);
+    }
+
     ESP_LOGI(TAG, "TM1650 LED 驱动与动画任务初始化完成");
+    vTaskDelete(NULL);
+}
+
+void bsp_led_init(void) {
+    static bool s_init_started = false;
+    if (s_init_started) return;
+    s_init_started = true;
+
+    xTaskCreatePinnedToCore(led_i2c_init_task, "led_i2c_init", 2048, NULL, 5, NULL, 1);
 }
 
 void bsp_led_set_alarm(uint8_t led_idx, led_alarm_state_t state) {
