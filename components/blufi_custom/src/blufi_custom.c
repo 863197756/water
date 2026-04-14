@@ -27,6 +27,7 @@
 #ifdef CONFIG_BT_NIMBLE_ENABLED
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
+#include "host/ble_att.h"
 #include "host/ble_hs.h"
 #include "host/util/util.h"
 #include "services/gap/ble_svc_gap.h"
@@ -42,6 +43,8 @@
 static const char *TAG = "BLUFI";
 static bool s_ble_is_connected = false; // 记录蓝牙连接状态
 static bool s_blufi_profile_inited = false; // 防止 NimBLE 重复 sync 导致重复 init
+
+#define BLUFI_PREFERRED_MTU 256
 
 static wifi_config_t sta_config;
 static bool gl_sta_connected = false;
@@ -77,6 +80,8 @@ static void blufi_on_sync(void) {
     }
 
     BLUFI_INFO("NimBLE 底层同步完成，MAC 地址已就绪！");
+
+    ble_att_set_preferred_mtu(BLUFI_PREFERRED_MTU);
 
     // 2. 【核心】此时底层已经准备完美，可以安全地启动 Blufi 配网广播了
     if (s_blufi_profile_inited) {
@@ -294,12 +299,17 @@ static void example_event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_para
         s_ble_is_connected = true;
         // 连接后停止广播，减少异常边缘情况（官方例程同样如此）
         esp_blufi_adv_stop();
+#ifdef CONFIG_BT_NIMBLE_ENABLED
+        ble_att_set_preferred_mtu(BLUFI_PREFERRED_MTU);
+#endif
         blufi_security_init();
         break;
     case ESP_BLUFI_EVENT_BLE_DISCONNECT:
         BLUFI_INFO("蓝牙已断开");
         s_ble_is_connected = false;
         blufi_security_deinit();
+        memset(&sta_config, 0, sizeof(sta_config));
+        esp_blufi_adv_stop();
         esp_blufi_adv_start(); 
         break;
     case ESP_BLUFI_EVENT_RECV_STA_SSID:
@@ -457,6 +467,9 @@ esp_err_t blufi_custom_init(void) {
 }
 
 void blufi_custom_deinit(void) {
+    s_ble_is_connected = false;
+    s_blufi_profile_inited = false;
+    blufi_security_deinit();
     esp_blufi_profile_deinit();
 
 #ifdef CONFIG_BT_BLUEDROID_ENABLED
