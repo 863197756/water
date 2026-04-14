@@ -13,6 +13,7 @@ static const char *TAG = "STORAGE";
 
 #define NS_DEV_STAT  "dev_stat"
 #define NS_ACTION_LOG "act_log"
+#define NS_DEV_ID    "dev_id"
 
 esp_err_t app_storage_init(void) {
     esp_err_t ret = nvs_flash_init();
@@ -187,4 +188,41 @@ uint8_t app_storage_get_pending_init(void) {
         nvs_close(handle);
     }
     return val;
+}
+
+esp_err_t app_storage_set_sn(const char *sn) {
+    if (!sn || !sn[0]) return ESP_ERR_INVALID_ARG;
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(NS_DEV_ID, NVS_READWRITE, &handle);
+    if (err != ESP_OK) return err;
+    err = nvs_set_str(handle, "sn", sn);
+    if (err == ESP_OK) {
+        err = nvs_commit(handle);
+    }
+    nvs_close(handle);
+    return err;
+}
+
+esp_err_t app_storage_get_sn(char *out_sn, size_t max_len) {
+    if (!out_sn || max_len == 0) return ESP_ERR_INVALID_ARG;
+    out_sn[0] = 0;
+
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(NS_DEV_ID, NVS_READONLY, &handle);
+    if (err != ESP_OK) return err;
+
+    size_t required = 0;
+    err = nvs_get_str(handle, "sn", NULL, &required);
+    if (err != ESP_OK) {
+        nvs_close(handle);
+        return err;
+    }
+    if (required > max_len) {
+        nvs_close(handle);
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    err = nvs_get_str(handle, "sn", out_sn, &required);
+    nvs_close(handle);
+    return err;
 }

@@ -8,6 +8,7 @@
 #include <sys/time.h>
 #include "esp_efuse.h"
 #include "esp_efuse_table.h"
+#include "app_storage.h"
 
 static const char *TAG = "PROTO";
 
@@ -19,18 +20,25 @@ static long long get_timestamp_ms(void) {
 }
 
 void protocol_get_device_id(char *out_id, size_t max_len) {
+    if (!out_id || max_len == 0) return;
+    out_id[0] = 0;
+    if (app_storage_get_sn(out_id, max_len) == ESP_OK && out_id[0]) {
+        return;
+    }
     uint8_t mac[6];
     esp_read_mac(mac, ESP_MAC_WIFI_STA);
-    // 使用 MAC 地址 hex 字符串作为 Device ID
-    snprintf(out_id, 13, "%02x%02x%02x%02x%02x%02x", 
+    snprintf(out_id, max_len, "%02x%02x%02x%02x%02x%02x",
              mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 }
-// 2. UID = eFuse Base MAC (这里演示为 Hex 字符串)
 void protocol_get_uid(char *out_uid, size_t max_len) {
+    if (!out_uid || max_len == 0) return;
+    out_uid[0] = 0;
+    if (app_storage_get_sn(out_uid, max_len) == ESP_OK && out_uid[0]) {
+        return;
+    }
     uint8_t mac[6];
-    // 读取出厂烧录在 eFuse 中的 MAC，不受软件修改影响
-    esp_efuse_mac_get_default(mac); 
-    snprintf(out_uid, max_len, "%02x%02x%02x%02x%02x%02x", 
+    esp_efuse_mac_get_default(mac);
+    snprintf(out_uid, max_len, "%02x%02x%02x%02x%02x%02x",
              mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 }
 
@@ -50,7 +58,7 @@ char* protocol_pack_init(const init_data_t *data) {
     protocol_get_uid(uid, sizeof(uid));
     
 
-    cJSON_AddStringToObject(root, "uid", uid);           // eFuse UID
+    cJSON_AddStringToObject(root, "uid", uid);
     cJSON_AddStringToObject(root, "fwVersion", data->fw_version);
     cJSON_AddStringToObject(root, "hwVersion", data->hw_version);
     cJSON_AddStringToObject(root, "mac", data->mac_str); // 格式化 MAC

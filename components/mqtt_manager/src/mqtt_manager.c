@@ -8,6 +8,7 @@
 #include "app_events.h"
 #include "esp_event.h"
 #include "esp_netif.h"
+#include "esp_crt_bundle.h"
 
 #include "esp_ota_ops.h"
 
@@ -197,6 +198,7 @@ void mqtt_manager_start(void) {
 
     esp_mqtt_client_config_t mqtt_cfg = {
         .broker.address.uri = cfg.full_url, // mqtt://ip:port
+        .broker.verification.crt_bundle_attach = (strncmp(cfg.full_url, "mqtts://", 8) == 0 || strncmp(cfg.full_url, "wss://", 6) == 0) ? esp_crt_bundle_attach : NULL,
         .credentials.username = cfg.username,
         .credentials.authentication.password = cfg.password_mqtt,
         // 如果需要客户端证书，在此处添加

@@ -7,6 +7,7 @@ idf_component_register(
         mqtt  #esp官方MQTT库
         esp_event
         esp_netif
+        # esp_crt_bundle
         app_storage
         app_events
         app_update

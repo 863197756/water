@@ -25,6 +25,7 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/queue.h"
 
 #include "esp_err.h"
 #include "esp_event.h"
@@ -38,6 +39,7 @@
 
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
+#include "host/ble_att.h"
 #include "host/ble_hs.h"
 #include "host/util/util.h"
 #include "services/gap/ble_svc_gap.h"
@@ -65,9 +67,10 @@ void ble_store_config_init(void);
 // -----------------------------
 // 参数
 // -----------------------------
-#define PROV_WINDOW_SEC          120
+#define PROV_WINDOW_SEC          1200
 #define PROV_JSON_MAX_LEN        512   // 单次写入最大 JSON 长度（需 <= MTU-3；建议小程序侧请求 MTU=256）
 #define PROV_WIFI_RETRY_MAX      3
+#define PROV_PREFERRED_MTU       256
 
 // -----------------------------
 // 协议步骤门禁
@@ -120,6 +123,7 @@ static bool s_notify_enabled = false;
 // 配网窗口
 static esp_timer_handle_t s_prov_timer = NULL;
 static bool s_prov_window_open = false;
+static int64_t s_prov_deadline_us = 0;
 
 // 状态机
 static int s_net_mode = -1; // 0=WiFi, 1=4G
@@ -132,6 +136,23 @@ static int  s_wifi_prov_retry = 0;
 // MQTT 反馈（沿用原工程：收到 APP_EVENT_MQTT_PLAN_RECEIVED 视为成功）
 static bool s_mqtt_waiting = false;
 static esp_timer_handle_t s_mqtt_timer = NULL;
+
+typedef struct {
+    char ssid[33];
+    char password[65];
+} prov_wifi_cfg_t;
+
+typedef enum {
+    PROV_WORK_WIFI_CONNECT = 1,
+} prov_work_type_t;
+
+typedef struct {
+    prov_work_type_t type;
+    prov_wifi_cfg_t wifi;
+} prov_work_item_t;
+
+static QueueHandle_t s_work_q = NULL;
+static TaskHandle_t s_work_task = NULL;
 
 // -----------------------------
 // 自定义 GATT UUID（128-bit）
@@ -156,6 +177,7 @@ static void prov_stop_advertising(void);
 static void prov_send_json_raw(const char *json_str);
 static void prov_send_kv_int(const char *key, int value);
 static void prov_handle_json(uint8_t *data, int len);
+static void prov_window_open(bool reset_deadline);
 
 // -----------------------------
 // 工具：安全拷贝 os_mbuf -> buf
@@ -203,12 +225,114 @@ static void prov_send_kv_int(const char *key, int value) {
     if (n > 0) prov_send_json_raw(payload);
 }
 
+static void prov_parse_mqtt_server(const char *in, char *scheme_out, size_t scheme_sz,
+                                  char *host_out, size_t host_sz, int *port_out) {
+    if (scheme_out && scheme_sz) {
+        strncpy(scheme_out, "mqtt", scheme_sz - 1);
+        scheme_out[scheme_sz - 1] = 0;
+    }
+    if (host_out && host_sz) {
+        host_out[0] = 0;
+    }
+    if (port_out) *port_out = 1883;
+    if (!in || !in[0] || !scheme_out || !host_out || !port_out) return;
+
+    const char *p = in;
+    const char *scheme_end = strstr(in, "://");
+    if (scheme_end) {
+        size_t n = (size_t)(scheme_end - in);
+        if (n >= scheme_sz) n = scheme_sz - 1;
+        memcpy(scheme_out, in, n);
+        scheme_out[n] = 0;
+        p = scheme_end + 3;
+    }
+
+    char hostport[128];
+    strncpy(hostport, p, sizeof(hostport) - 1);
+    hostport[sizeof(hostport) - 1] = 0;
+
+    char *path = strchr(hostport, '/');
+    if (path) *path = 0;
+
+    int default_port = (strncmp(scheme_out, "mqtts", 5) == 0) ? 8883 : 1883;
+    *port_out = default_port;
+
+    char *colon = strrchr(hostport, ':');
+    if (colon && colon[1]) {
+        *colon = 0;
+        int port = atoi(colon + 1);
+        if (port > 0 && port <= 65535) {
+            *port_out = port;
+        }
+    }
+
+    strncpy(host_out, hostport, host_sz - 1);
+    host_out[host_sz - 1] = 0;
+}
+
+static void prov_worker_task(void *arg) {
+    (void)arg;
+    prov_work_item_t item;
+    while (1) {
+        if (!s_work_q) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+            continue;
+        }
+        if (xQueueReceive(s_work_q, &item, portMAX_DELAY) != pdTRUE) {
+            continue;
+        }
+
+        if (item.type == PROV_WORK_WIFI_CONNECT) {
+            esp_err_t err;
+
+            s_wifi_ignore_disconnect_once = true;
+            err = esp_wifi_stop();
+            if (err != ESP_OK && err != ESP_ERR_WIFI_NOT_STARTED) {
+                PROV_W("esp_wifi_stop: %s", esp_err_to_name(err));
+            }
+
+            err = esp_wifi_set_mode(WIFI_MODE_STA);
+            if (err != ESP_OK) {
+                PROV_W("esp_wifi_set_mode: %s", esp_err_to_name(err));
+            }
+
+            wifi_config_t sta_config = {0};
+            strncpy((char *)sta_config.sta.ssid, item.wifi.ssid, sizeof(sta_config.sta.ssid) - 1);
+            strncpy((char *)sta_config.sta.password, item.wifi.password, sizeof(sta_config.sta.password) - 1);
+
+            err = esp_wifi_set_config(WIFI_IF_STA, &sta_config);
+            if (err != ESP_OK) {
+                PROV_E("esp_wifi_set_config failed: %s", esp_err_to_name(err));
+                s_wifi_prov_connecting = false;
+                prov_set_step(PROV_STEP_WAIT_WIFI_CFG, "wifi set cfg failed");
+                prov_send_kv_int("statusWiFi", 2);
+                continue;
+            }
+
+            err = esp_wifi_start();
+            if (err != ESP_OK && err != ESP_ERR_WIFI_NOT_STOPPED) {
+                PROV_W("esp_wifi_start: %s", esp_err_to_name(err));
+            }
+
+            err = esp_wifi_connect();
+            if (err != ESP_OK) {
+                PROV_E("esp_wifi_connect failed: %s", esp_err_to_name(err));
+                s_wifi_prov_connecting = false;
+                prov_set_step(PROV_STEP_WAIT_WIFI_CFG, "wifi connect failed");
+                prov_send_kv_int("statusWiFi", 2);
+                continue;
+            }
+        }
+    }
+}
+
 // -----------------------------
 // 配网窗口控制
 // -----------------------------
 static void prov_window_close_cb(void *arg) {
     (void)arg;
     s_prov_window_open = false;
+    s_prov_deadline_us = 0;
     PROV_I("Provision window closed");
     prov_stop_advertising();
 
@@ -218,7 +342,7 @@ static void prov_window_close_cb(void *arg) {
     }
 }
 
-static void prov_window_open(void) {
+static void prov_window_open(bool reset_deadline) {
     s_prov_window_open = true;
     s_step = PROV_STEP_WAIT_BLE_OPEN;
     s_net_mode = -1;
@@ -228,7 +352,13 @@ static void prov_window_open(void) {
     s_mqtt_waiting = false;
 
     if (s_prov_timer) esp_timer_stop(s_prov_timer);
-    esp_timer_start_once(s_prov_timer, (uint64_t)PROV_WINDOW_SEC * 1000000ULL);
+    int64_t now = esp_timer_get_time();
+    if (reset_deadline || s_prov_deadline_us <= 0 || now >= s_prov_deadline_us) {
+        s_prov_deadline_us = now + (int64_t)PROV_WINDOW_SEC * 1000000LL;
+    }
+    int64_t remain = s_prov_deadline_us - now;
+    if (remain < 1000) remain = 1000;
+    esp_timer_start_once(s_prov_timer, (uint64_t)remain);
 
     PROV_I("Provision window open for %d sec (step=%s)", PROV_WINDOW_SEC, prov_step_str(s_step));
     prov_start_advertising();
@@ -347,6 +477,17 @@ static int gatt_access_cb(uint16_t conn_handle, uint16_t attr_handle,
     return 0;
 }
 
+static int gatt_tx_access_cb(uint16_t conn_handle, uint16_t attr_handle,
+                             struct ble_gatt_access_ctxt *ctxt, void *arg) {
+    (void)conn_handle;
+    (void)attr_handle;
+    (void)arg;
+    if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
+        return 0;
+    }
+    return BLE_ATT_ERR_UNLIKELY;
+}
+
 static const struct ble_gatt_svc_def gatt_svcs[] = {
     {
         .type = BLE_GATT_SVC_TYPE_PRIMARY,
@@ -360,7 +501,7 @@ static const struct ble_gatt_svc_def gatt_svcs[] = {
             {
                 .uuid = &g_prov_tx_uuid.u,
                 // NimBLE 要求 characteristic 必须提供 access_cb（即使仅用于 notify），否则 ble_gatts_count_cfg 可能返回 EINVAL。
-                .access_cb = gatt_access_cb,
+                .access_cb = gatt_tx_access_cb,
                 .val_handle = &s_tx_val_handle,
                 .flags = BLE_GATT_CHR_F_NOTIFY,
             },
@@ -478,18 +619,20 @@ static void prov_handle_json(uint8_t *data, int len) {
         prov_set_step(PROV_STEP_WAIT_WIFI_RESULT, "wifi connect start");
         prov_send_kv_int("statusWiFi", 0);
 
-        wifi_config_t sta_config = {0};
-        strncpy((char *)sta_config.sta.ssid, ssid, sizeof(sta_config.sta.ssid) - 1);
-        strncpy((char *)sta_config.sta.password, password, sizeof(sta_config.sta.password) - 1);
-
-        // 关键：避免 “sta is connecting, cannot set config”
-        s_wifi_ignore_disconnect_once = true;
-        esp_wifi_stop();
-        esp_wifi_set_config(WIFI_IF_STA, &sta_config);
-        esp_wifi_start();
-        esp_err_t err = esp_wifi_connect();
-        if (err != ESP_OK) {
-            PROV_E("esp_wifi_connect failed: %s", esp_err_to_name(err));
+        if (s_work_q) {
+            prov_work_item_t item = {0};
+            item.type = PROV_WORK_WIFI_CONNECT;
+            strncpy(item.wifi.ssid, ssid, sizeof(item.wifi.ssid) - 1);
+            strncpy(item.wifi.password, password, sizeof(item.wifi.password) - 1);
+            if (xQueueSend(s_work_q, &item, 0) != pdTRUE) {
+                s_wifi_prov_connecting = false;
+                prov_set_step(PROV_STEP_WAIT_WIFI_CFG, "wifi work queue full");
+                prov_send_kv_int("statusWiFi", 2);
+            }
+        } else {
+            s_wifi_prov_connecting = false;
+            prov_set_step(PROV_STEP_WAIT_WIFI_CFG, "wifi work queue not ready");
+            prov_send_kv_int("statusWiFi", 2);
         }
 
         json_parse_end(&jctx);
@@ -497,7 +640,7 @@ static void prov_handle_json(uint8_t *data, int len) {
     }
 
     // Step 4: MQTT 配置
-    char mqtt_server_buf[64] = {0};
+    char mqtt_server_buf[128] = {0};
     if (json_obj_get_string(&jctx, "mqttserver", mqtt_server_buf, sizeof(mqtt_server_buf)) == 0) {
         if (s_step != PROV_STEP_WAIT_MQTT_CFG) {
             PROV_W("step mismatch for mqtt cfg, cur=%s", prov_step_str(s_step));
@@ -513,19 +656,16 @@ static void prov_handle_json(uint8_t *data, int len) {
         net_config_t cfg;
         if (app_storage_load_net_config(&cfg) != ESP_OK) memset(&cfg, 0, sizeof(cfg));
 
-        char *colon = strchr(mqtt_server_buf, ':');
-        if (colon) {
-            *colon = '\0';
-            strncpy(cfg.mqtt_host, mqtt_server_buf, sizeof(cfg.mqtt_host) - 1);
-            cfg.mqtt_port = atoi(colon + 1);
-        } else {
-            strncpy(cfg.mqtt_host, mqtt_server_buf, sizeof(cfg.mqtt_host) - 1);
-            cfg.mqtt_port = 1883;
-        }
+        char scheme[8] = {0};
+        char host[64] = {0};
+        int port = 0;
+        prov_parse_mqtt_server(mqtt_server_buf, scheme, sizeof(scheme), host, sizeof(host), &port);
+        strncpy(cfg.mqtt_host, host, sizeof(cfg.mqtt_host) - 1);
+        cfg.mqtt_port = port;
 
         strncpy(cfg.username, username_buf, sizeof(cfg.username) - 1);
         strncpy(cfg.password_mqtt, password_buf, sizeof(cfg.password_mqtt) - 1);
-        snprintf(cfg.full_url, sizeof(cfg.full_url), "mqtt://%s:%d", cfg.mqtt_host, cfg.mqtt_port);
+        snprintf(cfg.full_url, sizeof(cfg.full_url), "%s://%s:%d", scheme, cfg.mqtt_host, cfg.mqtt_port);
 
         app_storage_save_net_config(&cfg);
         app_storage_set_pending_init(1);
@@ -557,7 +697,17 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg) {
         if (event->connect.status == 0) {
             s_conn_handle = event->connect.conn_handle;
             s_notify_enabled = false; // 等待 subscribe 事件
+            s_step = PROV_STEP_WAIT_BLE_OPEN;
+            s_net_mode = -1;
+            s_wifi_prov_connecting = false;
+            s_wifi_prov_retry = 0;
+            s_wifi_ignore_disconnect_once = false;
+            s_mqtt_waiting = false;
+            if (s_mqtt_timer) esp_timer_stop(s_mqtt_timer);
             PROV_I("BLE connected; conn_handle=%d", s_conn_handle);
+            if (!s_prov_window_open) {
+                ble_gap_terminate(s_conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+            }
         } else {
             PROV_W("BLE connect failed; status=%d", event->connect.status);
             s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
@@ -591,6 +741,12 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg) {
         PROV_I("mtu update; conn_handle=%d mtu=%d", event->mtu.conn_handle, event->mtu.value);
         return 0;
 
+    case BLE_GAP_EVENT_ADV_COMPLETE:
+        if (s_prov_window_open && s_conn_handle == BLE_HS_CONN_HANDLE_NONE) {
+            prov_start_advertising();
+        }
+        return 0;
+
     default:
         return 0;
     }
@@ -616,6 +772,10 @@ static void prov_start_advertising(void) {
     fields.name = (uint8_t *)name;
     fields.name_len = strlen(name);
     fields.name_is_complete = 1;
+
+    fields.uuids128 = (ble_uuid128_t *)&g_prov_svc_uuid;
+    fields.num_uuids128 = 1;
+    fields.uuids128_is_complete = 1;
 
     int rc = ble_gap_adv_set_fields(&fields);
     if (rc != 0) {
@@ -645,12 +805,33 @@ static void on_reset(int reason) {
 }
 
 static void on_sync(void) {
-    int rc = ble_hs_id_infer_auto(0, &s_own_addr_type);
+    int rc = ble_hs_util_ensure_addr(0);
+    if (rc != 0) {
+        PROV_E("ble_hs_util_ensure_addr rc=%d", rc);
+        return;
+    }
+    rc = ble_hs_id_infer_auto(0, &s_own_addr_type);
     if (rc != 0) {
         PROV_E("ble_hs_id_infer_auto rc=%d", rc);
         return;
     }
-    prov_window_open();
+    ble_att_set_preferred_mtu(PROV_PREFERRED_MTU);
+    if (s_prov_deadline_us <= 0) {
+        prov_window_open(true);
+        return;
+    }
+    int64_t now = esp_timer_get_time();
+    if (now < s_prov_deadline_us) {
+        s_prov_window_open = true;
+        if (s_prov_timer) {
+            esp_timer_stop(s_prov_timer);
+            esp_timer_start_once(s_prov_timer, (uint64_t)(s_prov_deadline_us - now));
+        }
+        prov_start_advertising();
+    } else {
+        s_prov_window_open = false;
+        prov_stop_advertising();
+    }
 }
 
 static void host_task(void *param) {
@@ -696,6 +877,13 @@ esp_err_t blufi_custom_init(void) {
             .skip_unhandled_events = true,
         };
         ESP_ERROR_CHECK(esp_timer_create(&mcfg, &s_mqtt_timer));
+    }
+
+    if (!s_work_q) {
+        s_work_q = xQueueCreate(4, sizeof(prov_work_item_t));
+    }
+    if (!s_work_task) {
+        xTaskCreatePinnedToCore(prov_worker_task, "prov_worker", 3072, NULL, 5, &s_work_task, 1);
     }
 
     // 初始化 BLE Controller（NimBLE Host 依赖 Controller 提供 HCI）
@@ -764,6 +952,7 @@ esp_err_t blufi_custom_init(void) {
 void blufi_custom_deinit(void) {
     // 停止广播/断开连接
     s_prov_window_open = false;
+    s_prov_deadline_us = 0;
     prov_stop_advertising();
     if (s_conn_handle != BLE_HS_CONN_HANDLE_NONE) {
         ble_gap_terminate(s_conn_handle, BLE_ERR_REM_USER_CONN_TERM);
@@ -784,4 +973,19 @@ void blufi_send_custom_result(bool success, const char *msg) {
 void blufi_send_mqtt_status(int status) {
     // 保留旧接口：按文档字段名 statusMQTT
     prov_send_kv_int("statusMQTT", status);
+}
+
+esp_err_t load_net_config(int *mode, char *url, size_t max_len) {
+    if (!mode || !url || max_len == 0) return ESP_ERR_INVALID_ARG;
+    net_config_t cfg;
+    esp_err_t err = app_storage_load_net_config(&cfg);
+    if (err != ESP_OK) {
+        *mode = 0;
+        url[0] = 0;
+        return err;
+    }
+    *mode = cfg.mode;
+    strncpy(url, cfg.full_url, max_len - 1);
+    url[max_len - 1] = 0;
+    return ESP_OK;
 }

@@ -24,6 +24,50 @@
 
 static const char *TAG = "MAIN";
 
+static const bool s_debug_force_net_cfg = true;
+static const int s_debug_net_mode = 0;
+// static const char *s_debug_wifi_ssid = "PURESUN-1F";
+static const char *s_debug_wifi_ssid = "henu-students";
+static const char *s_debug_wifi_password = "wcx12345678";
+// static const char *s_debug_wifi_password = "404NotFound";
+static const bool s_debug_force_sn = true;
+static const char *s_debug_sn = "SN260414Y5JD6D";
+static const char *s_debug_mqtt_scheme = "mqtts";
+static const char *s_debug_mqtt_host = "mqtt.gredicer.top";
+static const int s_debug_mqtt_port = 8883;
+static const char *s_debug_mqtt_username = "backend_core_api";
+static const char *s_debug_mqtt_password = "wK8vN2mP5qX1wZ4yB7cR9tF3gH6dJ0sL";
+
+static void debug_apply_net_config(void) {
+    if (!s_debug_force_net_cfg) return;
+
+    net_config_t cfg = {0};
+    cfg.mode = s_debug_net_mode;
+
+    if (cfg.mode == 0) {
+        strncpy(cfg.ssid, s_debug_wifi_ssid ? s_debug_wifi_ssid : "", sizeof(cfg.ssid) - 1);
+        strncpy(cfg.password, s_debug_wifi_password ? s_debug_wifi_password : "", sizeof(cfg.password) - 1);
+    }
+
+    strncpy(cfg.mqtt_host, s_debug_mqtt_host ? s_debug_mqtt_host : "", sizeof(cfg.mqtt_host) - 1);
+    cfg.mqtt_port = s_debug_mqtt_port;
+    strncpy(cfg.username, s_debug_mqtt_username ? s_debug_mqtt_username : "", sizeof(cfg.username) - 1);
+    strncpy(cfg.password_mqtt, s_debug_mqtt_password ? s_debug_mqtt_password : "", sizeof(cfg.password_mqtt) - 1);
+    snprintf(cfg.full_url, sizeof(cfg.full_url), "%s://%s:%d",
+             (s_debug_mqtt_scheme && s_debug_mqtt_scheme[0]) ? s_debug_mqtt_scheme : "mqtt",
+             cfg.mqtt_host, cfg.mqtt_port);
+
+    ESP_ERROR_CHECK(app_storage_save_net_config(&cfg));
+    ESP_ERROR_CHECK(app_storage_set_pending_init(1));
+    ESP_LOGW(TAG, "Debug net config applied: mode=%d url=%s", cfg.mode, cfg.full_url);
+}
+
+static void debug_apply_sn(void) {
+    if (!s_debug_force_sn) return;
+    ESP_ERROR_CHECK(app_storage_set_sn(s_debug_sn));
+    ESP_LOGW(TAG, "Debug SN applied: %s", s_debug_sn);
+}
+
 
 
 
@@ -99,6 +143,8 @@ void app_main(void)
    
     // 存储与系统初始化
     ESP_ERROR_CHECK(app_storage_init());
+    debug_apply_sn();
+    debug_apply_net_config();
 
     // 注意：不要在每次启动时清空网络配置。
     // 网络/出厂重置应由按键或云端命令触发。
@@ -135,6 +181,8 @@ void app_main(void)
 
     // led
     bsp_led_init();
+    // 开启 LED 硬件独立测试
+    // xTaskCreate(led_hardware_test_task, "led_test", 2048, NULL, 5, NULL);
     
 
 }

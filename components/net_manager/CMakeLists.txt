@@ -7,5 +7,5 @@ idf_component_register(
         esp_netif
         app_events
         app_storage
-        modem_4g  # 待 4G 模组实现后开启
+        modem_4g 
 )

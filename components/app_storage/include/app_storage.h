@@ -87,3 +87,6 @@ esp_err_t app_storage_set_pending_init(uint8_t val);
  * @return 1=需要, 0=不需要 (默认)
  */
 uint8_t app_storage_get_pending_init(void);
+
+esp_err_t app_storage_set_sn(const char *sn);
+esp_err_t app_storage_get_sn(char *out_sn, size_t max_len);

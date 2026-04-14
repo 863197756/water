@@ -6,4 +6,5 @@ idf_component_register(
         json_parser     # jsmn 依赖
         efuse
         esp_event
+        app_storage
 )

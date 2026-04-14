@@ -5,7 +5,7 @@
 #include <stdbool.h>
 
 // 产品 ID (根据文档 topic 结构: product_id/device_id/...)
-#define PRODUCT_ID "01_water" 
+#define PRODUCT_ID "purifier" 
 
 
 // --- 1. 枚举定义 ---
@@ -96,14 +96,14 @@ typedef struct {
 // --- 3. 函数声明 ---
 
 /**
- * @brief 获取 DeviceID (使用 MAC 地址的 Hex 字符串，无冒号，小写)
+ * @brief 获取 DeviceID（优先使用 NVS 中的 SN；未设置时回退为 Wi-Fi STA MAC Hex）
  * 用于 MQTT Topic: yincheng_water/{device_id}/cmd
- * 示例: "aabbccddeeff"
+ * 示例: "SN260414Y5JD6D" 或回退 "aabbccddeeff"
  */
 void protocol_get_device_id(char *out_id, size_t max_len);
 /**
- * @brief 获取 eFuse 中的唯一 UID (通常也是出厂 MAC，但作为硬件唯一标识)
- * 示例: "AA:BB:CC:DD:EE:FF" (大写带冒号，或者 Hex 字符串，看后端需求)
+ * @brief 获取 UID（优先使用 NVS 中的 SN；未设置时回退为 eFuse Base MAC Hex）
+ * 示例: "SN260414Y5JD6D" 或回退 "aabbccddeeff"
  */
 void protocol_get_uid(char *out_uid, size_t max_len);
 /**
