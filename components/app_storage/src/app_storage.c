@@ -72,11 +72,13 @@ esp_err_t app_storage_save_status(const device_status_t *status) {
     nvs_set_i32(handle, "days", status->days);
     nvs_set_i32(handle, "capacity", status->capacity);
     
-    nvs_set_i32(handle, "f1", status->filter01);
-    nvs_set_i32(handle, "f2", status->filter02);
-    nvs_set_i32(handle, "f3", status->filter03);
-    nvs_set_i32(handle, "f4", status->filter04); // RO膜
-    nvs_set_i32(handle, "f5", status->filter05);
+    char key_days[16], key_cap[16];
+    for (int i = 0; i < 9; i++) {
+        snprintf(key_days, sizeof(key_days), "f%d_days", i+1);
+        snprintf(key_cap, sizeof(key_cap), "f%d_cap", i+1);
+        nvs_set_i32(handle, key_days, status->filter_days[i]);
+        nvs_set_i32(handle, key_cap, status->filter_capacity[i]);
+    }
     
     nvs_commit(handle);
     nvs_close(handle);
@@ -93,8 +95,10 @@ esp_err_t app_storage_load_status(device_status_t *status) {
         status->pay_mode = 0;     // 默认计时
         status->days = 365;       // 默认给 1 年体验
         status->capacity = 1000;  // 默认 1000 升
-        status->filter01 = 180;
-        status->filter04 = 720;
+        status->filter_days[0] = 180;
+        status->filter_capacity[0] = 1200;
+        status->filter_days[3] = 720;
+        status->filter_capacity[3] = 4000;
         return err;
     }
 
@@ -105,11 +109,13 @@ esp_err_t app_storage_load_status(device_status_t *status) {
     if (nvs_get_i32(handle, "days", &val) == ESP_OK) status->days = val;
     if (nvs_get_i32(handle, "capacity", &val) == ESP_OK) status->capacity = val;
     
-    if (nvs_get_i32(handle, "f1", &val) == ESP_OK) status->filter01 = val;
-    if (nvs_get_i32(handle, "f2", &val) == ESP_OK) status->filter02 = val;
-    if (nvs_get_i32(handle, "f3", &val) == ESP_OK) status->filter03 = val;
-    if (nvs_get_i32(handle, "f4", &val) == ESP_OK) status->filter04 = val;
-    if (nvs_get_i32(handle, "f5", &val) == ESP_OK) status->filter05 = val;
+    char key_days[16], key_cap[16];
+    for (int i = 0; i < 9; i++) {
+        snprintf(key_days, sizeof(key_days), "f%d_days", i+1);
+        snprintf(key_cap, sizeof(key_cap), "f%d_cap", i+1);
+        if (nvs_get_i32(handle, key_days, &val) == ESP_OK) status->filter_days[i] = val;
+        if (nvs_get_i32(handle, key_cap, &val) == ESP_OK) status->filter_capacity[i] = val;
+    }
 
     nvs_close(handle);
     return ESP_OK;

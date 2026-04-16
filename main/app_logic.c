@@ -42,22 +42,35 @@ static void app_logic_report_task(void *pvParameters) {
         } else {
             ESP_LOGW(TAG, "Log Upload Failed (MQTT not ready?)");
         }
-
-        // 2. 打包并发送 Status 数据 (做云端保活与状态同步)
-        status_report_t status_data = {
-            .tds_in = log_data.tds_in,
-            .tds_out = log_data.tds_out,
-            .tds_backup = log_data.tds_backup,
-            .total_water = status.total_flow / 1000, // 毫升转为升(L)
-            
-            .switch_status = status.switch_state,
-            .pay_mode = status.pay_mode,
-            .days = status.days,
-            .capacity = status.capacity,
-            .filter = {status.filter01, status.filter02, status.filter03, status.filter04, status.filter05}
-        };
-        mqtt_manager_publish_status(&status_data);
     }
+}
+
+// ============================================================================
+// 主动上报 Status 数据
+// ============================================================================
+void app_logic_report_status(void) {
+    device_status_t status;
+    app_storage_load_status(&status);
+
+    status_report_t status_data = {
+        .tds_in = bsp_sensor_get_tds_in(),
+        .tds_out = bsp_sensor_get_tds_out(),
+        .tds_backup = bsp_sensor_get_tds_backup(),
+        .total_water = status.total_flow / 1000, // 毫升转为升(L)
+        
+        .switch_status = status.switch_state,
+        .pay_mode = status.pay_mode,
+        .days = status.days,
+        .capacity = status.capacity,
+        .timestamp = 0, // 设为 0 时底层自动取当前时间
+    };
+    for (int i = 0; i < 9; i++) {
+        status_data.filters[i].valid = true; // 状态全量上报
+        status_data.filters[i].days = status.filter_days[i];
+        status_data.filters[i].capacity = status.filter_capacity[i];
+    }
+    mqtt_manager_publish_status(&status_data);
+    ESP_LOGI(TAG, "Status Reported");
 }
 
 // ============================================================================
@@ -140,11 +153,12 @@ void app_logic_handle_cmd(server_cmd_t *cmd) {
             status.pay_mode = cmd->param.pay_mode;
             status.days     = cmd->param.days;
             status.capacity = cmd->param.capacity;
-            status.filter01 = cmd->param.filter[0];
-            status.filter02 = cmd->param.filter[1];
-            status.filter03 = cmd->param.filter[2];
-            status.filter04 = cmd->param.filter[3];
-            status.filter05 = cmd->param.filter[4];
+            for (int i = 0; i < 9; i++) {
+                if (cmd->filters[i].valid) {
+                    status.filter_days[i] = cmd->filters[i].days;
+                    status.filter_capacity[i] = cmd->filters[i].capacity;
+                }
+            }
             
             // 3. 真正保存到 Flash
             app_storage_save_status(&status);
@@ -162,12 +176,23 @@ void app_logic_handle_cmd(server_cmd_t *cmd) {
         
         case CMD_METHOD_OTA:
             ESP_LOGI(TAG, "Action: OTA Update");
+            app_logic_report_status(); // OTA前也可上报一次
             app_logic_trigger_ota(cmd->param.ota_url);
             break;
             
+        case CMD_METHOD_QUERY_STATUS:
+            ESP_LOGI(TAG, "Action: Query Status");
+            app_logic_report_status();
+            break;
+
         default:
             ESP_LOGW(TAG, "Unknown Method: %d", cmd->method);
             break;
+    }
+    
+    // 除重置和OTA以外，收到指令处理完成后主动上报一次最新状态
+    if (cmd->method != CMD_METHOD_RESET && cmd->method != CMD_METHOD_OTA && cmd->method != CMD_METHOD_QUERY_STATUS) {
+        app_logic_report_status();
     }
 }
 

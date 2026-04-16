@@ -15,8 +15,9 @@ typedef enum {
     CMD_METHOD_POWER       = 0, // 开关机
     CMD_METHOD_RESET       = 1, // 重置
     CMD_METHOD_UPDATE_PLAN = 2, // 更新套餐/滤芯
-    CMD_METHOD_SET_WASH    = 3,  // 冲洗
-    CMD_METHOD_OTA         = 4   // OTA 更新
+    CMD_METHOD_SET_WASH    = 3, // 冲洗
+    CMD_METHOD_OTA         = 4, // OTA 更新
+    CMD_METHOD_QUERY_STATUS= 5  // 查询状态
 } cmd_method_t;
 
 // 报警代码 (AlertCode)
@@ -43,6 +44,7 @@ typedef struct {
 typedef struct {
     char cmd_id[32];      // 用于回执
     int method;           // 对应 cmd_method_t
+    long long timestamp;  // 时间戳
     
     // 参数集合 (解析 param 对象)
     struct {
@@ -53,7 +55,6 @@ typedef struct {
         int pay_mode;      // 0:计时, 1:计量
         int days;          // 剩余天数
         int capacity;      // 剩余流量
-        int filter[5];     // 5级滤芯剩余天数 (filter01 - filter05)
         
         // method=3
         int wash_duration; // 冲洗时长 (秒)
@@ -61,26 +62,42 @@ typedef struct {
         // method=4 (OTA 更新)
         char ota_url[128]; // OTA 下载 URL
     } param;
+    
+    // 滤芯更新数组 (最多 9 级)
+    struct {
+        bool valid;        // 解析时该级是否在数组中出现
+        int days;
+        int capacity;
+    } filters[9];
 } server_cmd_t;
 
 // 状态上报 (Status) - 主要是tds、流量、套餐
 typedef struct {
+    long long timestamp; // timestamp
     // --- 根节点字段 ---
     int tds_in;          // tdsIn
     int tds_out;         // tdsOut
     int tds_backup;      // tdsBackup
     int total_water;     // totalWater (累计用水量)
 
-    // --- param 对象字段 ---
-    int switch_status;   // param.switch
-    int pay_mode;        // param.payMode
-    int days;            // param.days
-    int capacity;        // param.capacity
-    int filter[5];       // param.filter01 - 05
+    // --- currentStatus 对象字段 ---
+    int switch_status;   // currentStatus.switch
+    int sale_mode;       // currentStatus.saleMode
+    int pay_mode;        // currentStatus.payMode
+    int days;            // currentStatus.days
+    int capacity;        // currentStatus.capacity
+    
+    // --- filters 数组 ---
+    struct {
+        bool valid;      // 该级是否要上报
+        int days;
+        int capacity;
+    } filters[9];
 } status_report_t;
 
 // 日志上报 (Log) - 主要是制水数据
 typedef struct {
+    long long timestamp; // timestamp
     int production_vol;  // productionVol (本次制水量)
     int tds_in;          // tdsIn
     int tds_out;         // tdsOut
@@ -89,8 +106,9 @@ typedef struct {
 
 // 报警上报 (Alert)
 typedef struct {
+    long long timestamp; // timestamp
     int alert_code;
-    long long timestamp;
+    char status[16];     // "triggered" or "cleared"
 } alert_report_t;
 
 // --- 3. 函数声明 ---

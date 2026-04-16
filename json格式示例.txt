@@ -1,0 +1,70 @@
+CMD：
+{
+  "cmdId": "cmd_8a7b6c5d4e3f", // 云端生成的唯一指令ID (UUID或自增序)，设备必须原样返回
+  "method": 2,                 // 0:开关机, 1:重置, 2:更新套餐, 3:冲洗, 4:OTA, 5:查状态
+  "timestamp": 1707012345000,  // 云端下发时间戳 (防止设备执行过期堆积指令)
+  "param": {                   // 具体的指令参数，按 method 需求下发
+    "switch": 1,               // 1开机, 0关机 (method=0)
+    "saleMode": 0,             // 0家用, 1售水机 (method=2)
+    "payMode": 0,              // 0计时, 1计量 (method=2)
+    "days": 365,               // 充值的计时天数 (method=2且paymode=0)
+    "capacity": 100,           // 充值的计量升数 (method=2且paymode=1)
+    "otaUrl": "https://example.com/fw_v1.0.2.bin" 
+  },
+ "filters": [
+  { "level": 1, "days": 150, "capacity": 1200 },
+  { "level": 2, "days": 150, "capacity": 1200 },
+  { "level": 4, "days": 300, "capacity": 4000 }
+ ]
+}
+注意：filters是一个数组，长度不固定（要更新的滤芯级数不固定），滤芯等级最高为9级，更改滤芯寿命时只更改可以匹配到的等级
+
+status：
+{
+  "timestamp": 1707012350000,  // 上报时的毫秒级时间戳
+  "tdsIn": 148,                // 原水TDS
+  "tdsOut": 12,                // 净水TDS
+  "tdsBackup": 12,             // 备用TDS
+  "totalWater": 1234,          // 机器累计历史总制水量 (单位: L)
+  "currentStatus": {           // 归纳当前机器的客观状态
+    "switch": 1,               // 1开机, 0关机
+    "saleMode": 0,
+    "payMode": 0,
+    "days": 300,               // 套餐剩余天数
+    "capacity": 850            // 套餐剩余水量
+  },
+"filters": [
+  { "level": 1, "days": 150, "capacity": 1200 },
+  { "level": 2, "days": 150, "capacity": 1200 },
+  { "level": 4, "days": 300, "capacity": 4000 }
+ ]
+}
+
+log：
+{
+  "timestamp": 1776064541000, 
+  "productionVol": 1500,       // 本周期内(这1小时内)新增的制水量 (单位: ml 或 L)
+  "tdsIn": 145,                // 本周期平均原水TDS
+  "tdsOut": 10,                // 本周期平均净水TDS
+  "tdsBackup": 10              // 本周期平均备用TDS
+}
+
+
+alert：
+{
+  "timestamp": 1707012345000,
+  "alertCode": 1,              // 0:漏水, 1:停水/低压, 2:制水超时, 3:TDS异常, 4:温度异常, 5:水泵异常
+  "status": "triggered"        // triggered: 触发告警; cleared: 告警解除 (重要，故障恢复时需告知云端)
+}
+
+
+
+
+
+
+
+
+
+
+
+

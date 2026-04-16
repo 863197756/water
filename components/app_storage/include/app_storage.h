@@ -29,12 +29,9 @@ typedef struct {
     int days;            // 剩余天数 (计时模式)
     int capacity;        // 剩余水量/L (计量模式)
     
-    // --- 新增：各级滤芯剩余寿命 (天数) ---
-    int filter01;
-    int filter02;
-    int filter03;
-    int filter04;
-    int filter05;
+    // --- 新增：各级滤芯剩余寿命 ---
+    int filter_days[9];
+    int filter_capacity[9];
 } device_status_t;
 
 typedef enum {

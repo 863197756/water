@@ -26,10 +26,10 @@ static const char *TAG = "MAIN";
 
 static const bool s_debug_force_net_cfg = true;
 static const int s_debug_net_mode = 0;
-// static const char *s_debug_wifi_ssid = "PURESUN-1F";
-static const char *s_debug_wifi_ssid = "henu-students";
-static const char *s_debug_wifi_password = "wcx12345678";
-// static const char *s_debug_wifi_password = "404NotFound";
+static const char *s_debug_wifi_ssid = "PURESUN-1F";
+// static const char *s_debug_wifi_ssid = "henu-students";
+// static const char *s_debug_wifi_password = "wcx12345678";
+static const char *s_debug_wifi_password = "404NotFound";
 static const bool s_debug_force_sn = true;
 static const char *s_debug_sn = "SN260414Y5JD6D";
 static const char *s_debug_mqtt_scheme = "mqtts";

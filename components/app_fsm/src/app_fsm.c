@@ -432,70 +432,70 @@ static const char *water_state_name(water_state_t state) {
     }
 }
 
-// ============================================================================
-// [模块五] 系统实时诊断面板任务 (Dashboard)
-// ============================================================================
-static void system_dashboard_task(void *pvParameters) {
-while (1) {
-        // 每 5 秒刷新一次面板
-        vTaskDelay(pdMS_TO_TICKS(5000));
+// // ============================================================================
+// // [模块五] 系统实时诊断面板任务 (Dashboard)
+// // ============================================================================
+// static void system_dashboard_task(void *pvParameters) {
+// while (1) {
+//         // 每 5 秒刷新一次面板
+//         vTaskDelay(pdMS_TO_TICKS(5000));
 
-        // 获取最新 NVS 存储数据
-        device_status_t status;
-        app_storage_load_status(&status);
+//         // 获取最新 NVS 存储数据
+//         device_status_t status;
+//         app_storage_load_status(&status);
 
-        printf("\n");
-        printf("========================================================\n");
-        printf("              [ 智能净水器系统实时诊断面板 ]            \n");
-        printf("========================================================\n");
+//         printf("\n");
+//         printf("========================================================\n");
+//         printf("              [ 智能净水器系统实时诊断面板 ]            \n");
+//         printf("========================================================\n");
         
-        // 1. 核心状态机
-        printf(" [1] 核心状态 (看门狗监控)\n");
-        printf("  ├─ 网络连通状态 : %s\n", state_name(s_state));
-        printf("  ├─ 制水业务状态 : %s\n", water_state_name(s_water_state));
-        printf("  ├─ 单次连续制水 : %lu 秒 (限 6h 超时保护)\n", s_making_water_seconds);
-        printf("  ├─ 累计制水时长 : %lu 秒 (满 2h 触发维护冲洗)\n", s_total_making_time);
-        printf("  ├─ 距上次冲洗   : %lu 秒 (满 6h 触发定期冲洗)\n", s_time_since_last_wash);
-        printf("  └─ 故障恢复倒数 : %lu 秒\n", s_fault_timer_seconds);
-        printf("\n");
+//         // 1. 核心状态机
+//         printf(" [1] 核心状态 (看门狗监控)\n");
+//         printf("  ├─ 网络连通状态 : %s\n", state_name(s_state));
+//         printf("  ├─ 制水业务状态 : %s\n", water_state_name(s_water_state));
+//         printf("  ├─ 单次连续制水 : %lu 秒 (限 6h 超时保护)\n", s_making_water_seconds);
+//         printf("  ├─ 累计制水时长 : %lu 秒 (满 2h 触发维护冲洗)\n", s_total_making_time);
+//         printf("  ├─ 距上次冲洗   : %lu 秒 (满 6h 触发定期冲洗)\n", s_time_since_last_wash);
+//         printf("  └─ 故障恢复倒数 : %lu 秒\n", s_fault_timer_seconds);
+//         printf("\n");
 
-        // 2. 硬件传感器实时读数
-        printf(" [2] 传感器实时数据\n");
-        printf("  ├─ 原水水压 (低压): %s\n", s_hw_low_pressure ? "【缺水/断开】" : "正常/闭合");
-        printf("  ├─ 储水压力 (高压): %s\n", s_hw_high_pressure ? "【水满/闭合】" : "未满/断开");
-        printf("  ├─ 实时水温 (NTC) : %.1f °C\n", bsp_sensor_get_temperature());
-        printf("  ├─ 水质 TDS (ppm) : 进水 %d | 纯水 %d | 备用 %d\n", 
-                bsp_sensor_get_tds_in(), bsp_sensor_get_tds_out(), bsp_sensor_get_tds_backup());
-        printf("  └─ 流量计累计脉冲 : %lu (读后清零前)\n", bsp_sensor_get_flow_pulses());
-        printf("\n");
+//         // 2. 硬件传感器实时读数
+//         printf(" [2] 传感器实时数据\n");
+//         printf("  ├─ 原水水压 (低压): %s\n", s_hw_low_pressure ? "【缺水/断开】" : "正常/闭合");
+//         printf("  ├─ 储水压力 (高压): %s\n", s_hw_high_pressure ? "【水满/闭合】" : "未满/断开");
+//         printf("  ├─ 实时水温 (NTC) : %.1f °C\n", bsp_sensor_get_temperature());
+//         printf("  ├─ 水质 TDS (ppm) : 进水 %d | 纯水 %d | 备用 %d\n", 
+//                 bsp_sensor_get_tds_in(), bsp_sensor_get_tds_out(), bsp_sensor_get_tds_backup());
+//         printf("  └─ 流量计累计脉冲 : %lu (读后清零前)\n", bsp_sensor_get_flow_pulses());
+//         printf("\n");
 
-        // 3. 继电器与外设执行器
-        printf(" [3] 外设执行器状态\n");
-        printf("  ├─ 进水电磁阀     : %s\n", bsp_get_inlet_valve_state() ? "■ 开启" : "□ 关闭");
-        printf("  ├─ 废水电磁阀     : %s\n", bsp_get_flush_valve_state() ? "■ 开启" : "□ 关闭");
-        printf("  └─ 增压水泵       : %s\n", bsp_get_pump_state() ? "■ 运行" : "□ 停止");
-        printf("\n");
+//         // 3. 继电器与外设执行器
+//         printf(" [3] 外设执行器状态\n");
+//         printf("  ├─ 进水电磁阀     : %s\n", bsp_get_inlet_valve_state() ? "■ 开启" : "□ 关闭");
+//         printf("  ├─ 废水电磁阀     : %s\n", bsp_get_flush_valve_state() ? "■ 开启" : "□ 关闭");
+//         printf("  └─ 增压水泵       : %s\n", bsp_get_pump_state() ? "■ 运行" : "□ 停止");
+//         printf("\n");
 
-        // 4. 用户套餐与计费参数
-        printf(" [4] NVS 控制参数 (云端同步)\n");
-        printf("  ├─ 设备软开关机   : %s\n", status.switch_state ? "开机" : "关机拦截");
-        printf("  ├─ 当前计费模式   : %s\n", status.pay_mode == 0 ? "计时模式" : "计量模式");
+//         // 4. 用户套餐与计费参数
+//         printf(" [4] NVS 控制参数 (云端同步)\n");
+//         printf("  ├─ 设备软开关机   : %s\n", status.switch_state ? "开机" : "关机拦截");
+//         printf("  ├─ 当前计费模式   : %s\n", status.pay_mode == 0 ? "计时模式" : "计量模式");
 
-        float display_capacity = status.capacity;
-        if (status.pay_mode == 1) {
-            display_capacity -= s_accumulated_liters; // 实时扣减零头显示
-        }
-        uint32_t display_total_flow = status.total_flow + (uint32_t)(s_accumulated_liters * 1000.0f);
+//         float display_capacity = status.capacity;
+//         if (status.pay_mode == 1) {
+//             display_capacity -= s_accumulated_liters; // 实时扣减零头显示
+//         }
+//         uint32_t display_total_flow = status.total_flow + (uint32_t)(s_accumulated_liters * 1000.0f);
         
-        // 使用 %.2f 打印带两位小数的升数！
-        printf("  ├─ 剩余天数/水量  : %d 天 / %.2f L\n", status.days, display_capacity);
-        printf("  ├─ 历史总制水量   : %lu mL\n", display_total_flow);
+//         // 使用 %.2f 打印带两位小数的升数！
+//         printf("  ├─ 剩余天数/水量  : %d 天 / %.2f L\n", status.days, display_capacity);
+//         printf("  ├─ 历史总制水量   : %lu mL\n", display_total_flow);
         
-        printf("  └─ 滤芯剩余寿命   : F1=%d天, F2=%d天, F3=%d天, F4(RO)=%d天, F5=%d天\n", 
-                status.filter01, status.filter02, status.filter03, status.filter04, status.filter05);
-        printf("========================================================\n\n");
-    }
-}
+//         printf("  └─ 滤芯剩余寿命   : F1=%d天, F2=%d天, F3=%d天, F4(RO)=%d天, F5=%d天\n", 
+//                 status.filter01, status.filter02, status.filter03, status.filter04, status.filter05);
+//         printf("========================================================\n\n");
+//     }
+// }
 
 // ============================================================================
 // 初始化入口
