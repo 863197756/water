@@ -183,11 +183,7 @@ esp_err_t protocol_parse_cmd(const char *json_str, int len, server_cmd_t *out_cm
     if ((item = cJSON_GetObjectItem(root, "timestamp")) != NULL && cJSON_IsNumber(item)) {
         out_cmd->timestamp = (long long)item->valuedouble;
     }
-    if (out_cmd->method == CMD_METHOD_OTA) {
-        if ((item = cJSON_GetObjectItem(root, "url")) != NULL && cJSON_IsString(item)) {
-            strncpy(out_cmd->param.ota_url, item->valuestring, sizeof(out_cmd->param.ota_url) - 1);
-        }
-    }
+
     
     
 
@@ -202,8 +198,10 @@ esp_err_t protocol_parse_cmd(const char *json_str, int len, server_cmd_t *out_cm
         if ((item = cJSON_GetObjectItem(param, "payMode")) != NULL) out_cmd->param.pay_mode = item->valueint;
         if ((item = cJSON_GetObjectItem(param, "days")) != NULL) out_cmd->param.days = item->valueint;
         if ((item = cJSON_GetObjectItem(param, "capacity")) != NULL) out_cmd->param.capacity = item->valueint;
-        if ((item = cJSON_GetObjectItem(param, "otaUrl")) != NULL && cJSON_IsString(item)) {
-            strncpy(out_cmd->param.ota_url, item->valuestring, sizeof(out_cmd->param.ota_url) - 1);
+        if (out_cmd->method == CMD_METHOD_OTA) {
+            if ((item = cJSON_GetObjectItem(param, "otaUrl")) != NULL && cJSON_IsString(item)) {
+                strncpy(out_cmd->param.ota_url, item->valuestring, sizeof(out_cmd->param.ota_url) - 1);
+            }
         }
     }
 
