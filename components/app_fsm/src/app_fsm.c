@@ -125,8 +125,29 @@ static bool check_quota_allow_water(void) {
     app_storage_load_status(&status);
 
     if (status.switch_state == 0) return false; // 关机
+    // 1. 检查主套餐 (流量或时间)
     if (status.pay_mode == 0 && status.days <= 0) return false; // 计时到期
     if (status.pay_mode == 1 && status.capacity <= 0) return false; // 流量用尽
+    // 2. 检查 9 级滤芯 (双轨记录，单轨鉴权)
+    for (int i = 0; i < 9; i++) {
+        if (!status.filter_valid[i]) {
+            continue; // 未启用/未安装的滤芯直接跳过
+        }
+        
+        if (status.filter_type[i] == 0) {
+            // 计时型滤芯，只看天数
+            if (status.filter_days[i] <= 0) {
+                ESP_LOGW(TAG, "第 %d 级滤芯 (计时型) 已到期，拒绝制水!", i + 1);
+                return false;
+            }
+        } else if (status.filter_type[i] == 1) {
+            // 计量型滤芯，只看水量
+            if (status.filter_capacity[i] <= 0) {
+                ESP_LOGW(TAG, "第 %d 级滤芯 (计量型) 已耗尽，拒绝制水!", i + 1);
+                return false;
+            }
+        }
+    }
     return true;
 }
 
@@ -382,6 +403,7 @@ static void water_monitor_task(void *pvParameters) {
                     app_storage_load_status(&status);
 
                     status.total_flow += (deduct_liters * 1000); // NVS里总水量单位是毫升
+                    bool need_intercept = false; // 是否需要强制停机拦截标志
 
                     // 核心拦截：如果是计量套餐，执行扣费
                     if (status.pay_mode == 1) { 
@@ -392,8 +414,27 @@ static void water_monitor_task(void *pvParameters) {
                             ESP_LOGE(TAG, "🚨 套餐水量已彻底用尽，强制停机拦截！");
                             status.capacity = 0;
                             // 抛出评估事件，状态机会因为鉴权不通过自动关闭水泵和进水阀
-                            esp_event_post(WATER_INTERNAL_EVENTS, WATER_EV_EVALUATE, NULL, 0, 0);
+                            need_intercept = true;
                         }
+                    }
+                    // 2. 扣除 9 级滤芯的容量 (所有有效滤芯都要扣)
+                    for (int i = 0; i < 9; i++) {
+                        if (status.filter_valid[i]) {
+                            // 无论类型，水量都要双轨递减 (允许减到负数，不兜底归0)
+                            status.filter_capacity[i] -= deduct_liters; 
+                            
+                            // 单轨鉴权：仅当它是计量滤芯，且恰好 <= 0 时，触发拦截
+                            if (status.filter_type[i] == 1 && status.filter_capacity[i] <= 0) {
+                                ESP_LOGE(TAG, "🚨 第 %d 级计量滤芯水量已用尽！", i + 1);
+                                need_intercept = true;
+                            }
+                        }
+                    }
+                    // 3. 执行强制拦截
+                    if (need_intercept) {
+                        ESP_LOGE(TAG, "🚨 套餐水量或滤芯已耗尽，强制停机拦截！");
+                        // 抛出评估事件，状态机会因为 check_quota_allow_water 不通过而关闭水泵
+                        esp_event_post(WATER_INTERNAL_EVENTS, WATER_EV_EVALUATE, NULL, 0, 0);
                     }
                     app_storage_save_status(&status); // 存入 Flash
                 }

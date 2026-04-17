@@ -72,10 +72,15 @@ esp_err_t app_storage_save_status(const device_status_t *status) {
     nvs_set_i32(handle, "days", status->days);
     nvs_set_i32(handle, "capacity", status->capacity);
     
-    char key_days[16], key_cap[16];
+    char key_val[16], key_typ[16], key_days[16], key_cap[16];
     for (int i = 0; i < 9; i++) {
+        snprintf(key_val, sizeof(key_val), "f%d_val", i+1);
+        snprintf(key_typ, sizeof(key_typ), "f%d_typ", i+1);
         snprintf(key_days, sizeof(key_days), "f%d_days", i+1);
         snprintf(key_cap, sizeof(key_cap), "f%d_cap", i+1);
+        
+        nvs_set_u8(handle, key_val, status->filter_valid[i]?1:0); // bool 存为 u8
+        nvs_set_i32(handle, key_typ, status->filter_type[i]);
         nvs_set_i32(handle, key_days, status->filter_days[i]);
         nvs_set_i32(handle, key_cap, status->filter_capacity[i]);
     }
@@ -89,16 +94,13 @@ esp_err_t app_storage_load_status(device_status_t *status) {
     nvs_handle_t handle;
     esp_err_t err = nvs_open(NS_DEV_STAT, NVS_READONLY, &handle);
     if (err != ESP_OK) {
-        // 如果读取失败（比如设备刚刷机第一次运行），给一组默认的安全放行值
+        // 读取失败（全新刷机或被擦除），给极其严格的安全默认值防“白嫖”
         memset(status, 0, sizeof(device_status_t));
-        status->switch_state = 1; // 默认开机
+        status->switch_state = 1; // 允许开机，但会因为额度为 0 被状态机拦截制水
         status->pay_mode = 0;     // 默认计时
-        status->days = 365;       // 默认给 1 年体验
-        status->capacity = 1000;  // 默认 1000 升
-        status->filter_days[0] = 180;
-        status->filter_capacity[0] = 1200;
-        status->filter_days[3] = 720;
-        status->filter_capacity[3] = 4000;
+        status->days = 0;         // 【修改为0】等云端下发真实额度
+        status->capacity = 0;     // 【修改为0】
+        // 滤芯的 valid 默认全为 false (0)，无需额外赋初值
         return err;
     }
 
@@ -109,10 +111,15 @@ esp_err_t app_storage_load_status(device_status_t *status) {
     if (nvs_get_i32(handle, "days", &val) == ESP_OK) status->days = val;
     if (nvs_get_i32(handle, "capacity", &val) == ESP_OK) status->capacity = val;
     
-    char key_days[16], key_cap[16];
+    char key_val[16], key_typ[16], key_days[16], key_cap[16];
+    uint8_t b_val = 0;
     for (int i = 0; i < 9; i++) {
+        snprintf(key_val, sizeof(key_val), "f%d_val", i+1);
+        snprintf(key_typ, sizeof(key_typ), "f%d_typ", i+1);
         snprintf(key_days, sizeof(key_days), "f%d_days", i+1);
         snprintf(key_cap, sizeof(key_cap), "f%d_cap", i+1);
+        if (nvs_get_u8(handle, key_val, &b_val) == ESP_OK) status->filter_valid[i] = (b_val != 0);
+        if (nvs_get_i32(handle, key_typ, &val) == ESP_OK) status->filter_type[i] = val;
         if (nvs_get_i32(handle, key_days, &val) == ESP_OK) status->filter_days[i] = val;
         if (nvs_get_i32(handle, key_cap, &val) == ESP_OK) status->filter_capacity[i] = val;
     }

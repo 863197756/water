@@ -65,7 +65,9 @@ void app_logic_report_status(void) {
         .timestamp = 0, // 设为 0 时底层自动取当前时间
     };
     for (int i = 0; i < 9; i++) {
-        status_data.filters[i].valid = true; // 状态全量上报
+        // 如果板子没这级滤芯，这里是 false，protocol_pack_status 打包时就会彻底忽略它
+        status_data.filters[i].valid = status.filter_valid[i]; 
+        status_data.filters[i].type = status.filter_type[i];
         status_data.filters[i].days = status.filter_days[i];
         status_data.filters[i].capacity = status.filter_capacity[i];
     }
@@ -155,6 +157,8 @@ void app_logic_handle_cmd(server_cmd_t *cmd) {
             status.capacity = cmd->param.capacity;
             for (int i = 0; i < 9; i++) {
                 if (cmd->filters[i].valid) {
+                    status.filter_valid[i] = true;                 // 激活该级滤芯
+                    status.filter_type[i] = cmd->filters[i].type;  // 记录计费类型
                     status.filter_days[i] = cmd->filters[i].days;
                     status.filter_capacity[i] = cmd->filters[i].capacity;
                 }
