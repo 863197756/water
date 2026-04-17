@@ -29,9 +29,11 @@ typedef struct {
     int days;            // 剩余天数 (计时模式)
     int capacity;        // 剩余水量/L (计量模式)
     
-    // --- 新增：各级滤芯剩余寿命 ---
-    int filter_days[9];
-    int filter_capacity[9];
+    // 使用 9 个元素的数组存储滤芯
+    bool filter_valid[9]; // true 表示该级滤芯已安装/云端已下发
+    int  filter_type[9];  // 0:计时, 1:计量
+    int  filter_days[9];
+    int  filter_capacity[9];
 } device_status_t;
 
 typedef enum {

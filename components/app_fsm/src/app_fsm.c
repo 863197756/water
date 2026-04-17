@@ -153,7 +153,7 @@ static void transition_water_state(water_state_t next, const char *reason) {
         //     app_storage_save_status(&status);
         //     s_accumulated_liters = 0.0f; // 存完清零
         // }
-        // TODO: 可在此处将制水时长换算为流量并保存 NVS
+        //
     }
     if (prev == WATER_STATE_WASHING) {
         xTimerStop(s_wash_timer, 0);

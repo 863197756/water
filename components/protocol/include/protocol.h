@@ -90,6 +90,7 @@ typedef struct {
     // --- filters 数组 ---
     struct {
         bool valid;      // 该级是否要上报
+        int type;          // 【新增】0: 计时, 1: 计量
         int days;
         int capacity;
     } filters[9];
