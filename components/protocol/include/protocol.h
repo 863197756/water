@@ -66,6 +66,7 @@ typedef struct {
     // 滤芯更新数组 (最多 9 级)
     struct {
         bool valid;        // 解析时该级是否在数组中出现
+        int type;          // 【新增】0: 计时, 1: 计量
         int days;
         int capacity;
     } filters[9];

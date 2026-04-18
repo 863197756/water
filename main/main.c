@@ -58,7 +58,7 @@ static void debug_apply_net_config(void) {
              cfg.mqtt_host, cfg.mqtt_port);
 
     ESP_ERROR_CHECK(app_storage_save_net_config(&cfg));
-    ESP_ERROR_CHECK(app_storage_set_pending_init(1));
+    // ESP_ERROR_CHECK(app_storage_set_pending_init(1));
     ESP_LOGW(TAG, "Debug net config applied: mode=%d url=%s", cfg.mode, cfg.full_url);
 }
 

@@ -91,6 +91,8 @@ esp_err_t app_storage_save_status(const device_status_t *status) {
 }
 
 esp_err_t app_storage_load_status(device_status_t *status) {
+    if (!status) return ESP_ERR_INVALID_ARG;
+    memset(status, 0, sizeof(device_status_t));
     nvs_handle_t handle;
     esp_err_t err = nvs_open(NS_DEV_STAT, NVS_READONLY, &handle);
     if (err != ESP_OK) {

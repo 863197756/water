@@ -1,5 +1,6 @@
 #pragma once
 #include "esp_err.h"
+#include <stdbool.h>
 
 #define NET_CONFIG_NAMESPACE "net_cfg"
 #define NET_CONFIG_KEY       "config"
