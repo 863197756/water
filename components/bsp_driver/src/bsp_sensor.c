@@ -127,45 +127,80 @@ void bsp_sensor_init(void) {
     ESP_LOGI(TAG, "传感器子系统初始化完成");
 }
 
+/ ==========================================
+// 3. 算法计算逻辑 (NTC 独立，TDS 批处理防浪涌)
 // ==========================================
-// 3. 算法计算逻辑
-// ==========================================
-// --- 封装一个自带电源脉冲和延时的安全读取函数 ---
-static int read_adc_raw_with_power(adc_channel_t channel) {
-    bsp_set_sensor_power(true);          // 1. 打开传感器总电源
-    vTaskDelay(pdMS_TO_TICKS(20));       // 2. 延时 20ms，等待 100nF 电容充电和运放稳定
-    
-    int raw;
-    adc_oneshot_read(s_adc1_handle, channel, &raw); // 3. 瞬间采样
-    
-    bsp_set_sensor_power(false);         // 4. 立刻断电，防止探头极化腐蚀！
-    return raw;
-}
+
+// 缓存 TDS 读取的值，防止频繁唤醒硬件
+static int s_raw_tds_in = 0;
+static int s_raw_tds_out = 0;
+static int s_raw_tds_backup = 0;
+static uint32_t s_last_read_ticks = 0;
+
+// --- NTC 温度独立读取 (随时可用，不受 IO15 限制) ---
 float bsp_sensor_get_temperature(void) {
-    int raw = read_adc_raw_with_power(ADC_CHAN_TEMP_NTC);
-    // TODO: 根据您的 10k NTC 电路分压比例和 B值(如3950)计算真实温度
+    int raw_temp;
+    // 直接进行瞬间采样，无需控制电源
+    adc_oneshot_read(s_adc1_handle, ADC_CHAN_TEMP_NTC, &raw_temp);
+    
+    // TODO: 根据 raw_temp 和您的 10k NTC 电路分压比例、B值(如3950)计算真实温度
     // 这里做个示例占位：假设返回 25.0 摄氏度
     return 25.0f; 
 }
 
-static int calculate_tds(adc_channel_t channel) {
-    int raw = read_adc_raw_with_power(channel);
+// --- TDS 统一批处理读取：一次通电，读取全部 3 个 TDS ---
+static void bsp_sensor_read_tds_batch(void) {
+    // 限制读取频率（1 秒内重复调用直接返回，防止密集轰炸硬件 LDO）
+    if (xTaskGetTickCount() - s_last_read_ticks < pdMS_TO_TICKS(1000) && s_last_read_ticks != 0) {
+        return; 
+    }
+
+    // 1. 打开 TDS 传感器专供电源 (IO15 = High)
+    bsp_set_sensor_power(true);          
     
-    float voltage = (float)raw * 3.3f / 4095.0f;
-    float temp = bsp_sensor_get_temperature(); // 这里会独立触发一次测温的电源脉冲
+    // 2. 延时 20ms，等待运放稳定并给 LDO 后级电容充饱电
+    vTaskDelay(pdMS_TO_TICKS(20));       
+    
+    // 3. 瞬间抓取 3 个 TDS 通道的数据 (去除了 NTC)
+    adc_oneshot_read(s_adc1_handle, ADC_CHAN_TDS_IN, &s_raw_tds_in);
+    adc_oneshot_read(s_adc1_handle, ADC_CHAN_TDS_OUT, &s_raw_tds_out);
+    adc_oneshot_read(s_adc1_handle, ADC_CHAN_TDS_BACKUP, &s_raw_tds_backup);
+    
+    // 4. 立刻断电防极化腐蚀 (IO15 = Low)
+    bsp_set_sensor_power(false);         
+    
+    s_last_read_ticks = xTaskGetTickCount();
+}
+
+// --- 核心计算 ---
+static int calculate_tds(int raw_adc) {
+    float voltage = (float)raw_adc * 3.3f / 4095.0f;
+    
+    // 获取实时温度（现在它非常快，不会引发 IO15 动作）
+    float temp = bsp_sensor_get_temperature(); 
     
     // 核心：温度补偿公式 (每升高1度，电导率增加约 2%)
     float comp_voltage = voltage / (1.0f + 0.02f * (temp - 25.0f));
     
-    // TODO: 这里需要根据您的探头 K 值进行二次项或线性拟合
-    // 示例公式：TDS = 标定系数 * 补偿电压
+    // TODO: 根据您的探头 K 值进行计算
     int tds_value = (int)(comp_voltage * 100.0f); // 占位系数
     return (tds_value > 0) ? tds_value : 0;
 }
 
-int bsp_sensor_get_tds_in(void)     { return calculate_tds(ADC_CHAN_TDS_IN); }
-int bsp_sensor_get_tds_out(void)    { return calculate_tds(ADC_CHAN_TDS_OUT); }
-int bsp_sensor_get_tds_backup(void) { return calculate_tds(ADC_CHAN_TDS_BACKUP); }
+int bsp_sensor_get_tds_in(void) { 
+    bsp_sensor_read_tds_batch();
+    return calculate_tds(s_raw_tds_in); 
+}
+
+int bsp_sensor_get_tds_out(void) { 
+    bsp_sensor_read_tds_batch();
+    return calculate_tds(s_raw_tds_out); 
+}
+
+int bsp_sensor_get_tds_backup(void) { 
+    bsp_sensor_read_tds_batch();
+    return calculate_tds(s_raw_tds_backup); 
+}
 
 uint32_t bsp_sensor_get_flow_pulses(void) {
     int count = 0;
