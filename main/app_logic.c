@@ -85,9 +85,13 @@ static void ota_task(void *pvParameter) {
 
     esp_http_client_config_t config = {
         .url = url,
-        .crt_bundle_attach = esp_crt_bundle_attach,
+        // 权威证书绑定
+        // .crt_bundle_attach = esp_crt_bundle_attach,        //测试期间注释掉
         .timeout_ms = 10000,
         .keep_alive_enable = true,
+        //强制跳过证书合法性校验
+        .skip_cert_common_name_check = true,                  //测试期间使用
+        .cert_pem = NULL,                                     //测试期间使用
     };
 
     esp_https_ota_config_t ota_config = {
