@@ -13,6 +13,7 @@
 #include "esp_crt_bundle.h"
 
 static const char *TAG = "LOGIC";
+static bool s_ota_is_running = false;
 
 // ============================================================================
 // 定时数据上报任务 (使用真实的传感器数据)
@@ -104,15 +105,23 @@ static void ota_task(void *pvParameter) {
     }
 
     free(url);
+    s_ota_is_running = false; // 解锁 (无论是成功还是失败，退出前解锁)
     vTaskDelete(NULL);
 }
 
 void app_logic_trigger_ota(const char *url) {
+ if (s_ota_is_running) {
+        ESP_LOGW(TAG, "OTA 正在进行中，已忽略重复的升级请求！");
+        return;
+    }
+    
     char *url_copy = strdup(url); 
     if (url_copy == NULL) {
         ESP_LOGE(TAG, "内存不足，无法启动 OTA");
         return;
     }
+    
+    s_ota_is_running = true; // 加锁
     xTaskCreate(&ota_task, "ota_task", 8192, url_copy, 5, NULL);
 }
 
