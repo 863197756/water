@@ -27,9 +27,9 @@
 
 | 类型 | 名称 | UUID | 属性 | 用途 |
 |---|---|---|---|---|
-| Service | Provision Service | `9e3c0001-2c6b-4f9b-8b5a-6f686e3d110a` | Primary | 自定义配网服务 |
-| Characteristic | RX | `9e3c0002-2c6b-4f9b-8b5a-6f686e3d110a` | Write / WriteNoRsp | 小程序写入 JSON 到设备 |
-| Characteristic | TX | `9e3c0003-2c6b-4f9b-8b5a-6f686e3d110a` | Notify | 设备通知回包 JSON 给小程序 |
+| Service | Provision Service | `9E3C0001-2C6B-4F9B-8B5A-6F686E3D110A` | Primary | 自定义配网服务 |
+| Characteristic | RX | `9E3C0002-2C6B-4F9B-8B5A-6F686E3D110A` | Write / WriteNoRsp | 小程序写入 JSON 到设备 |
+| Characteristic | TX | `9E3C0003-2C6B-4F9B-8B5A-6F686E3D110A` | Notify | 设备通知回包 JSON 给小程序 |
 
 ### 2.3 连接后的必做动作
 1. 发现服务与特征值。

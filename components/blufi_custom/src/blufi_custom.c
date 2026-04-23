@@ -72,6 +72,13 @@ void ble_store_config_init(void);
 #define PROV_WIFI_RETRY_MAX      3
 #define PROV_PREFERRED_MTU       256
 
+#define PROV_FRAG_MAGIC0         0x50
+#define PROV_FRAG_MAGIC1         0x56
+#define PROV_FRAG_VER            0x01
+#define PROV_FRAG_FLAG_START     0x01
+#define PROV_FRAG_FLAG_END       0x02
+#define PROV_FRAG_HDR_LEN        8
+
 // -----------------------------
 // 协议步骤门禁
 // -----------------------------
@@ -119,6 +126,12 @@ static uint8_t s_own_addr_type;
 static uint16_t s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
 static uint16_t s_tx_val_handle = 0;
 static bool s_notify_enabled = false;
+static uint16_t s_conn_mtu = 23;
+
+static uint8_t s_rx_frag_buf[PROV_JSON_MAX_LEN + 1];
+static uint16_t s_rx_frag_total = 0;
+static uint16_t s_rx_frag_len = 0;
+static bool s_rx_frag_active = false;
 
 // 配网窗口
 static esp_timer_handle_t s_prov_timer = NULL;
@@ -159,9 +172,9 @@ static TaskHandle_t s_work_task = NULL;
 // 说明：请在小程序侧使用同样的 UUID 进行发现/读写。
 // -----------------------------
 // 注意：BLE_UUID128_INIT 传入的是“字节序（little-endian）”，以下对应的小程序侧 UUID 字符串是：
-// Service: 9e3c0001-2c6b-4f9b-8b5a-6f686e3d110a
-// RX(Write): 9e3c0002-2c6b-4f9b-8b5a-6f686e3d110a
-// TX(Notify): 9e3c0003-2c6b-4f9b-8b5a-6f686e3d110a
+// Service: 9E3C0001-2C6B-4F9B-8B5A-6F686E3D110A
+// RX(Write): 9E3C0002-2C6B-4F9B-8B5A-6F686E3D110A
+// TX(Notify): 9E3C0003-2C6B-4F9B-8B5A-6F686E3D110A
 static const ble_uuid128_t g_prov_svc_uuid =
     BLE_UUID128_INIT(0x0a,0x11,0x3d,0x6e,0x68,0x6f,0x5a,0x8b,0x9b,0x4f,0x6b,0x2c,0x01,0x00,0x3c,0x9e);
 static const ble_uuid128_t g_prov_rx_uuid =
@@ -190,6 +203,17 @@ static int om_to_buf(const struct os_mbuf *om, uint8_t *dst, int dst_sz) {
     return len;
 }
 
+static uint16_t prov_le16(const uint8_t *p) {
+    return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
+}
+
+static uint16_t prov_payload_max(void) {
+    uint16_t mtu = s_conn_mtu ? s_conn_mtu : 23;
+    if (mtu < 23) mtu = 23;
+    uint16_t max = mtu - 3;
+    return max;
+}
+
 // -----------------------------
 // BLE Notify：发送 JSON
 // -----------------------------
@@ -211,11 +235,52 @@ static void prov_send_json_raw(const char *json_str) {
         return;
     }
 
-    struct os_mbuf *om = ble_hs_mbuf_from_flat(json_str, strlen(json_str));
-    if (!om) return;
-    int rc = ble_gatts_notify_custom(s_conn_handle, s_tx_val_handle, om);
-    if (rc != 0) {
-        PROV_W("notify failed rc=%d", rc);
+    size_t json_len = strlen(json_str);
+    uint16_t max_payload = prov_payload_max();
+    if (json_len <= max_payload) {
+        struct os_mbuf *om = ble_hs_mbuf_from_flat(json_str, json_len);
+        if (!om) return;
+        int rc = ble_gatts_notify_custom(s_conn_handle, s_tx_val_handle, om);
+        if (rc != 0) {
+            PROV_W("notify failed rc=%d", rc);
+        }
+        return;
+    }
+
+    if (max_payload <= PROV_FRAG_HDR_LEN) {
+        PROV_W("TX dropped: mtu too small mtu=%u", (unsigned)s_conn_mtu);
+        return;
+    }
+
+    uint16_t chunk_max = max_payload - PROV_FRAG_HDR_LEN;
+    uint16_t total = (json_len > PROV_JSON_MAX_LEN) ? PROV_JSON_MAX_LEN : (uint16_t)json_len;
+    uint16_t offset = 0;
+
+    while (offset < total) {
+        uint16_t remain = total - offset;
+        uint16_t chunk = remain > chunk_max ? chunk_max : remain;
+        uint8_t frame[PROV_FRAG_HDR_LEN + (PROV_JSON_MAX_LEN + 1)];
+        frame[0] = PROV_FRAG_MAGIC0;
+        frame[1] = PROV_FRAG_MAGIC1;
+        frame[2] = PROV_FRAG_VER;
+        uint8_t flags = 0;
+        if (offset == 0) flags |= PROV_FRAG_FLAG_START;
+        if (offset + chunk == total) flags |= PROV_FRAG_FLAG_END;
+        frame[3] = flags;
+        frame[4] = (uint8_t)(total & 0xff);
+        frame[5] = (uint8_t)((total >> 8) & 0xff);
+        frame[6] = (uint8_t)(offset & 0xff);
+        frame[7] = (uint8_t)((offset >> 8) & 0xff);
+        memcpy(&frame[PROV_FRAG_HDR_LEN], json_str + offset, chunk);
+
+        struct os_mbuf *om = ble_hs_mbuf_from_flat(frame, PROV_FRAG_HDR_LEN + chunk);
+        if (!om) return;
+        int rc = ble_gatts_notify_custom(s_conn_handle, s_tx_val_handle, om);
+        if (rc != 0) {
+            PROV_W("notify failed rc=%d", rc);
+            return;
+        }
+        offset += chunk;
     }
 }
 
@@ -473,7 +538,66 @@ static int gatt_access_cb(uint16_t conn_handle, uint16_t attr_handle,
         return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
     }
 
-    prov_handle_json(buf, len);
+    if (buf[0] == '{') {
+        prov_handle_json(buf, len);
+        return 0;
+    }
+
+    if (len < PROV_FRAG_HDR_LEN) {
+        return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+    }
+    if (buf[0] != PROV_FRAG_MAGIC0 || buf[1] != PROV_FRAG_MAGIC1 || buf[2] != PROV_FRAG_VER) {
+        return BLE_ATT_ERR_UNLIKELY;
+    }
+
+    uint8_t flags = buf[3];
+    uint16_t total = prov_le16(&buf[4]);
+    uint16_t offset = prov_le16(&buf[6]);
+    uint16_t payload_len = (uint16_t)(len - PROV_FRAG_HDR_LEN);
+
+    if (flags & PROV_FRAG_FLAG_START) {
+        if (total == 0 || total > PROV_JSON_MAX_LEN || offset != 0) {
+            s_rx_frag_active = false;
+            s_rx_frag_total = 0;
+            s_rx_frag_len = 0;
+            return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+        }
+        s_rx_frag_active = true;
+        s_rx_frag_total = total;
+        s_rx_frag_len = 0;
+    }
+
+    if (!s_rx_frag_active) {
+        return 0;
+    }
+    if (offset != s_rx_frag_len) {
+        s_rx_frag_active = false;
+        s_rx_frag_total = 0;
+        s_rx_frag_len = 0;
+        return BLE_ATT_ERR_UNLIKELY;
+    }
+    if ((uint32_t)s_rx_frag_len + payload_len > s_rx_frag_total) {
+        s_rx_frag_active = false;
+        s_rx_frag_total = 0;
+        s_rx_frag_len = 0;
+        return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+    }
+
+    memcpy(s_rx_frag_buf + s_rx_frag_len, &buf[PROV_FRAG_HDR_LEN], payload_len);
+    s_rx_frag_len += payload_len;
+
+    if (flags & PROV_FRAG_FLAG_END) {
+        if (s_rx_frag_len != s_rx_frag_total) {
+            s_rx_frag_active = false;
+            s_rx_frag_total = 0;
+            s_rx_frag_len = 0;
+            return BLE_ATT_ERR_UNLIKELY;
+        }
+        s_rx_frag_buf[s_rx_frag_len] = 0;
+        s_rx_frag_active = false;
+        s_rx_frag_total = 0;
+        prov_handle_json(s_rx_frag_buf, s_rx_frag_len);
+    }
     return 0;
 }
 
@@ -697,6 +821,10 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg) {
         if (event->connect.status == 0) {
             s_conn_handle = event->connect.conn_handle;
             s_notify_enabled = false; // 等待 subscribe 事件
+            s_conn_mtu = 23;
+            s_rx_frag_active = false;
+            s_rx_frag_total = 0;
+            s_rx_frag_len = 0;
             s_step = PROV_STEP_WAIT_BLE_OPEN;
             s_net_mode = -1;
             s_wifi_prov_connecting = false;
@@ -719,6 +847,10 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg) {
         PROV_I("BLE disconnected; reason=%d", event->disconnect.reason);
         s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
         s_notify_enabled = false;
+        s_conn_mtu = 23;
+        s_rx_frag_active = false;
+        s_rx_frag_total = 0;
+        s_rx_frag_len = 0;
         prov_set_step(PROV_STEP_WAIT_BLE_OPEN, "ble disconnected"); // 下次连接重新走流程
         s_net_mode = -1;
         s_wifi_prov_connecting = false;
@@ -739,6 +871,7 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg) {
 
     case BLE_GAP_EVENT_MTU:
         PROV_I("mtu update; conn_handle=%d mtu=%d", event->mtu.conn_handle, event->mtu.value);
+        s_conn_mtu = event->mtu.value;
         return 0;
 
     case BLE_GAP_EVENT_ADV_COMPLETE:
