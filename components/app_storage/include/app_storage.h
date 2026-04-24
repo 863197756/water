@@ -90,3 +90,6 @@ uint8_t app_storage_get_pending_init(void);
 
 esp_err_t app_storage_set_sn(const char *sn);
 esp_err_t app_storage_get_sn(char *out_sn, size_t max_len);
+
+esp_err_t app_storage_set_pump_spec(uint8_t spec);
+esp_err_t app_storage_get_pump_spec(uint8_t *out_spec);

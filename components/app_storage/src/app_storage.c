@@ -241,3 +241,27 @@ esp_err_t app_storage_get_sn(char *out_sn, size_t max_len) {
     nvs_close(handle);
     return err;
 }
+
+esp_err_t app_storage_set_pump_spec(uint8_t spec) {
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(NS_DEV_ID, NVS_READWRITE, &handle);
+    if (err != ESP_OK) return err;
+    err = nvs_set_u8(handle, "pump_spec", spec);
+    if (err == ESP_OK) {
+        err = nvs_commit(handle);
+    }
+    nvs_close(handle);
+    return err;
+}
+
+esp_err_t app_storage_get_pump_spec(uint8_t *out_spec) {
+    if (!out_spec) return ESP_ERR_INVALID_ARG;
+    *out_spec = 0;
+
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(NS_DEV_ID, NVS_READONLY, &handle);
+    if (err != ESP_OK) return err;
+    err = nvs_get_u8(handle, "pump_spec", out_spec);
+    nvs_close(handle);
+    return err;
+}

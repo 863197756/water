@@ -1,8 +1,11 @@
 #include "app_fsm.h"
 #include <stdbool.h>
 #include <string.h>
+#include <stdio.h>
 #include "esp_log.h"
 #include "esp_event.h"
+#include "esp_system.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/timers.h"
@@ -10,6 +13,7 @@
 #include "app_storage.h"
 #include "net_manager.h"
 #include "mqtt_manager.h"
+#include "protocol.h"
 #include "bsp_pump_valve.h"
 #include "bsp_sensor.h"
 #include "bsp_pump_valve.h"
@@ -67,6 +71,16 @@ static float s_accumulated_liters = 0.0f;
 
 static TimerHandle_t s_wash_timer = NULL;   // 18秒冲洗倒计时
 
+// --- 新增：水泵自适应与保护变量 ---
+static float s_pump_limit_over = 3.0f; // 默认给个大值，防止启动误判
+static float s_pump_limit_dry  = 0.5f; // 空转阈值通常通用
+static bool  s_pump_recognized = false;// 是否已完成硬件识别
+static uint8_t s_pump_overcurrent_cnt = 0;
+static uint8_t s_pump_dryrun_cnt = 0;
+static uint32_t s_pump_run_seconds = 0;
+
+static uint8_t s_pump_spec_cached = 0;
+
 // ============================================================================
 // [模块一] 原有的网络与 MQTT 管理逻辑 (原封不动保留)
 // ============================================================================
@@ -118,6 +132,11 @@ static void try_start_mqtt(const char *reason) {
 // ============================================================================
 // [模块二] 制水状态机核心逻辑 (补全了所有边界规则)
 // ============================================================================
+
+static void calibrate_pump_zero_if_safe(void) {
+    if (bsp_get_pump_state()) return;
+    bsp_sensor_pump_current_calibrate_zero();
+}
 
 // --- 鉴权拦截逻辑 ---
 static bool check_quota_allow_water(void) {
@@ -183,7 +202,12 @@ static void transition_water_state(water_state_t next, const char *reason) {
     // 进入新状态时的硬件执行
     switch (next) {
         case WATER_STATE_WASHING:
+            calibrate_pump_zero_if_safe();
+            s_pump_run_seconds = 0;
+            s_pump_overcurrent_cnt = 0;
+            s_pump_dryrun_cnt = 0;
             s_time_since_last_wash = 0; // 重置6小时计时器
+            s_need_pre_wash = false;
             bsp_set_pump(true);
             bsp_set_inlet_valve(true);
             bsp_set_flush_valve(true);
@@ -192,6 +216,10 @@ static void transition_water_state(water_state_t next, const char *reason) {
 
         case WATER_STATE_MAKING:
             s_making_water_seconds = 0;
+            calibrate_pump_zero_if_safe();
+            s_pump_run_seconds = 0;
+            s_pump_overcurrent_cnt = 0;
+            s_pump_dryrun_cnt = 0;
             bsp_set_inlet_valve(true);
             bsp_set_flush_valve(false); // 关废水，建立背压
             bsp_set_pump(true);
@@ -209,7 +237,6 @@ static void transition_water_state(water_state_t next, const char *reason) {
             bsp_set_pump(false);
             bsp_set_inlet_valve(false);
             bsp_set_flush_valve(false);
-            // TODO: 发送 alert 警报 MQTT
             break;
             
         default:
@@ -218,7 +245,7 @@ static void transition_water_state(water_state_t next, const char *reason) {
 }
 
 // --- 核心评估逻辑：每次硬件状态改变/冲洗结束时调用 ---
-static void evaluate_water_state(void) {
+static void evaluate_water_state_ex(bool allow_exit_washing) {
     if (s_water_state == WATER_STATE_FAULT) return; // 故障时只能等待30分钟倒计时
 
     // 规则：缺水保护拥有最高优先级，强制打断所有动作 (包括冲洗)
@@ -227,7 +254,7 @@ static void evaluate_water_state(void) {
         return;
     }
 
-    if (s_water_state == WATER_STATE_WASHING) return; // 冲洗中不被打断(除非缺水)
+    if (s_water_state == WATER_STATE_WASHING && !allow_exit_washing) return; // 冲洗中不被打断(除非缺水)
 
     if (s_hw_high_pressure) {
         transition_water_state(WATER_STATE_FULL, "评估: 储水桶满");
@@ -248,6 +275,10 @@ static void evaluate_water_state(void) {
     }
 }
 
+static void evaluate_water_state(void) {
+    evaluate_water_state_ex(false);
+}
+
 // --- 冲洗结束定时器回调 ---
 static void wash_timer_cb(TimerHandle_t xTimer) {
     ESP_LOGI(TAG, "18秒冲洗结束，请求重新评估状态...");
@@ -263,10 +294,12 @@ static void on_water_internal_event(void *arg, esp_event_base_t event_base, int3
     if (event_id == WATER_EV_EVALUATE) {
         evaluate_water_state();
     } else if (event_id == WATER_EV_TRIGGER_WASH) {
+        s_need_pre_wash = false;
         transition_water_state(WATER_STATE_WASHING, "内部触发强制冲洗");
     } else if (event_id == WATER_EV_WASH_DONE) {
-        s_water_state = WATER_STATE_INIT;
-        evaluate_water_state();
+        if (s_water_state != WATER_STATE_WASHING) return;
+        s_need_pre_wash = false;
+        evaluate_water_state_ex(true);
     }
 }
 
@@ -380,10 +413,95 @@ static void water_monitor_task(void *pvParameters) {
             }
         }
 
-        // 3. 制水运行期的：超时保护 与【流量结算】
-        if (s_water_state == WATER_STATE_MAKING) {
-            s_making_water_seconds++;
-            s_total_making_time++; 
+        
+        if (s_water_state == WATER_STATE_MAKING || s_water_state == WATER_STATE_WASHING) {
+            
+            // ==========================================
+            // [A] 水泵电流读取
+            // ==========================================
+            float pump_current = bsp_sensor_get_pump_current();
+            s_pump_run_seconds++;
+            
+            // ==========================================
+            // [B] 硬件自适应识别 (开机后的首次运行)
+            // ==========================================
+            // 避开前4秒的启动浪涌，在第5秒进行平稳期采样识别
+            if (s_pump_run_seconds == 5) {
+                uint8_t spec_new = 0;
+                if (pump_current < 1.8f) {
+                    s_pump_limit_over = 2.0f; // 100G 泵最大 2A
+                    spec_new = 1;
+                    ESP_LOGW(TAG, "🤖 硬件自适应: 识别为【100G水泵】(当前 %.2fA), 锁定过流阈值: %.2fA", pump_current, s_pump_limit_over);
+                } else {
+                    s_pump_limit_over = 3.0f; // 400G 泵最大 3A
+                    spec_new = 2;
+                    ESP_LOGW(TAG, "🤖 硬件自适应: 识别为【400G水泵】(当前 %.2fA), 锁定过流阈值: %.2fA", pump_current, s_pump_limit_over);
+                }
+                s_pump_recognized = true;
+
+                if (s_pump_spec_cached == 0) {
+                    uint8_t prev = 0;
+                    if (app_storage_get_pump_spec(&prev) == ESP_OK) {
+                        s_pump_spec_cached = prev;
+                    }
+                }
+                if (s_pump_spec_cached != 0 && spec_new != 0 && s_pump_spec_cached != spec_new) {
+                    alert_report_t alert = {
+                        .timestamp = 0,
+                        .alert_code = 5,
+                        .status = "triggered",
+                    };
+                    mqtt_manager_publish_alert(&alert);
+                }
+                if (spec_new != 0) {
+                    app_storage_set_pump_spec(spec_new);
+                    s_pump_spec_cached = spec_new;
+                }
+            }
+
+            // ==========================================
+            // [C] 异常状态监测与保护
+            // ==========================================
+            if (s_pump_run_seconds >= 5) {
+                
+                // 1) 过流/堵转保护检测
+                if (pump_current > s_pump_limit_over) {
+                    s_pump_overcurrent_cnt++;
+                    if (s_pump_overcurrent_cnt >= 2) { // 连续 2 秒超标
+                        ESP_LOGE(TAG, "🚨 致命异常：水泵过流/堵转！当前电流: %.2f A，阈值: %.2f A", pump_current, s_pump_limit_over);
+                        alert_report_t alert = {
+                            .timestamp = 0,
+                            .alert_code = 5,
+                            .status = "triggered",
+                        };
+                        mqtt_manager_publish_alert(&alert);
+                        transition_water_state(WATER_STATE_FAULT, "水泵过流保护");
+                    }
+                } else {
+                    s_pump_overcurrent_cnt = 0;
+                }
+
+                // 2) 空转/缺水保护检测
+                if (pump_current < s_pump_limit_dry) {
+                    s_pump_dryrun_cnt++;
+                    if (s_pump_dryrun_cnt >= 3) { // 连续 3 秒过低
+                        ESP_LOGE(TAG, "🚨 致命异常：水泵空转/无负载！当前电流: %.2f A", pump_current);
+                        alert_report_t alert = {
+                            .timestamp = 0,
+                            .alert_code = 5,
+                            .status = "triggered",
+                        };
+                        mqtt_manager_publish_alert(&alert);
+                        transition_water_state(WATER_STATE_FAULT, "水泵空转保护");
+                    }
+                } else {
+                    s_pump_dryrun_cnt = 0;
+                }
+            }
+            if (s_water_state == WATER_STATE_MAKING) {
+                s_making_water_seconds++;
+                s_total_making_time++;
+            }
 
             // --- 【新增】读取流量计并精准扣费 ---
             uint32_t pulses = bsp_sensor_get_flow_pulses();
@@ -457,6 +575,7 @@ static void water_monitor_task(void *pvParameters) {
             bsp_sensor_clear_flow_pulses();
             // s_accumulated_liters = 0.0f; //白嫖漏洞
         }
+
     }
 }
 
@@ -473,70 +592,148 @@ static const char *water_state_name(water_state_t state) {
     }
 }
 
-// // ============================================================================
-// // [模块五] 系统实时诊断面板任务 (Dashboard)
-// // ============================================================================
-// static void system_dashboard_task(void *pvParameters) {
-// while (1) {
-//         // 每 5 秒刷新一次面板
-//         vTaskDelay(pdMS_TO_TICKS(5000));
+// ============================================================================
+// [模块五] 系统实时诊断面板任务 (Dashboard)
+// ============================================================================
+static void system_dashboard_task(void *pvParameters) {
+    (void)pvParameters;
+    while (1) {
+        // 每 5 秒刷新一次面板
+        vTaskDelay(pdMS_TO_TICKS(5000));
 
-//         // 获取最新 NVS 存储数据
-//         device_status_t status;
-//         app_storage_load_status(&status);
+        // 获取最新 NVS 存储数据
+        device_status_t status;
+        app_storage_load_status(&status);
 
-//         printf("\n");
-//         printf("========================================================\n");
-//         printf("              [ 智能净水器系统实时诊断面板 ]            \n");
-//         printf("========================================================\n");
+        net_config_t net_cfg = {0};
+        app_storage_load_net_config(&net_cfg);
+
+        char device_id[64] = {0};
+        char uid[64] = {0};
+        protocol_get_device_id(device_id, sizeof(device_id));
+        protocol_get_uid(uid, sizeof(uid));
+
+        uint32_t heap_free = esp_get_free_heap_size();
+        uint32_t min_heap_free = esp_get_minimum_free_heap_size();
+        uint64_t uptime_ms = (uint64_t)(esp_timer_get_time() / 1000ULL);
+
+        float pump_current = bsp_sensor_get_pump_current();
+        bool quota_allow = check_quota_allow_water();
+
+        const char *pump_spec_str = "UNKNOWN";
+        if (s_pump_spec_cached == 1) pump_spec_str = "100G";
+        else if (s_pump_spec_cached == 2) pump_spec_str = "400G";
+
+        uint32_t fault_elapsed_s = (s_water_state == WATER_STATE_FAULT) ? s_fault_timer_seconds : 0;
+        uint32_t fault_remain_s = 0;
+        if (s_water_state == WATER_STATE_FAULT && s_fault_timer_seconds < 30 * 60) {
+            fault_remain_s = (30 * 60) - s_fault_timer_seconds;
+        }
+
+        printf("\n");
+        printf("========================================================\n");
+        printf("              [ 智能净水器系统实时诊断面板 ]            \n");
+        printf("========================================================\n");
         
-//         // 1. 核心状态机
-//         printf(" [1] 核心状态 (看门狗监控)\n");
-//         printf("  ├─ 网络连通状态 : %s\n", state_name(s_state));
-//         printf("  ├─ 制水业务状态 : %s\n", water_state_name(s_water_state));
-//         printf("  ├─ 单次连续制水 : %lu 秒 (限 6h 超时保护)\n", s_making_water_seconds);
-//         printf("  ├─ 累计制水时长 : %lu 秒 (满 2h 触发维护冲洗)\n", s_total_making_time);
-//         printf("  ├─ 距上次冲洗   : %lu 秒 (满 6h 触发定期冲洗)\n", s_time_since_last_wash);
-//         printf("  └─ 故障恢复倒数 : %lu 秒\n", s_fault_timer_seconds);
-//         printf("\n");
+        // 1. 核心状态机
+        printf(" [1] 核心状态 (看门狗监控)\n");
+        printf("  ├─ DeviceID/UID : %s / %s\n", device_id, uid);
+        printf("  ├─ Uptime/Heap  : %llu ms | free %lu B (min %lu B)\n",
+               (unsigned long long)uptime_ms, (unsigned long)heap_free, (unsigned long)min_heap_free);
+        printf("  ├─ Net/MQTT FSM  : %s (net_ready=%d)\n", state_name(s_state), s_net_ready ? 1 : 0);
+        printf("  ├─ Water FSM     : %s (quota=%s, need_pre_wash=%d)\n",
+               water_state_name(s_water_state), quota_allow ? "OK" : "BLOCK", s_need_pre_wash ? 1 : 0);
+        printf("  ├─ 单次连续制水 : %lu 秒 (限 6h 超时保护)\n", (unsigned long)s_making_water_seconds);
+        printf("  ├─ 累计制水时长 : %lu 秒 (满 2h 触发维护冲洗)\n", (unsigned long)s_total_making_time);
+        printf("  ├─ 距上次冲洗   : %lu 秒 (满 6h 触发定期冲洗)\n", (unsigned long)s_time_since_last_wash);
+        printf("  └─ 故障恢复(30min): 已停机 %lu s, 剩余 %lu s\n",
+               (unsigned long)fault_elapsed_s, (unsigned long)fault_remain_s);
+        printf("\n");
 
-//         // 2. 硬件传感器实时读数
-//         printf(" [2] 传感器实时数据\n");
-//         printf("  ├─ 原水水压 (低压): %s\n", s_hw_low_pressure ? "【缺水/断开】" : "正常/闭合");
-//         printf("  ├─ 储水压力 (高压): %s\n", s_hw_high_pressure ? "【水满/闭合】" : "未满/断开");
-//         printf("  ├─ 实时水温 (NTC) : %.1f °C\n", bsp_sensor_get_temperature());
-//         printf("  ├─ 水质 TDS (ppm) : 进水 %d | 纯水 %d | 备用 %d\n", 
-//                 bsp_sensor_get_tds_in(), bsp_sensor_get_tds_out(), bsp_sensor_get_tds_backup());
-//         printf("  └─ 流量计累计脉冲 : %lu (读后清零前)\n", bsp_sensor_get_flow_pulses());
-//         printf("\n");
+        // 2. 硬件传感器实时读数
+        printf(" [2] 传感器实时数据\n");
+        printf("  ├─ 原水水压 (低压): %s\n", s_hw_low_pressure ? "【缺水/断开】" : "正常/闭合");
+        printf("  ├─ 储水压力 (高压): %s\n", s_hw_high_pressure ? "【水满/闭合】" : "未满/断开");
+        printf("  ├─ 实时水温 (NTC) : %.1f °C\n", bsp_sensor_get_temperature());
+        printf("  ├─ 水质 TDS (ppm) : 进水 %d | 纯水 %d | 备用 %d\n", 
+                bsp_sensor_get_tds_in(), bsp_sensor_get_tds_out(), bsp_sensor_get_tds_backup());
+        printf("  ├─ 流量计累计脉冲 : %lu (读后清零前)\n", (unsigned long)bsp_sensor_get_flow_pulses());
+        printf("  └─ 水泵电流        : %.2f A (spec=%s, recognized=%d, run=%lu s, over=%u/%0.2fA, dry=%u/%0.2fA)\n",
+               (double)pump_current,
+               pump_spec_str,
+               s_pump_recognized ? 1 : 0,
+               (unsigned long)s_pump_run_seconds,
+               (unsigned)s_pump_overcurrent_cnt,
+               (double)s_pump_limit_over,
+               (unsigned)s_pump_dryrun_cnt,
+               (double)s_pump_limit_dry);
+        printf("\n");
 
-//         // 3. 继电器与外设执行器
-//         printf(" [3] 外设执行器状态\n");
-//         printf("  ├─ 进水电磁阀     : %s\n", bsp_get_inlet_valve_state() ? "■ 开启" : "□ 关闭");
-//         printf("  ├─ 废水电磁阀     : %s\n", bsp_get_flush_valve_state() ? "■ 开启" : "□ 关闭");
-//         printf("  └─ 增压水泵       : %s\n", bsp_get_pump_state() ? "■ 运行" : "□ 停止");
-//         printf("\n");
+        // 3. 继电器与外设执行器
+        printf(" [3] 外设执行器状态\n");
+        printf("  ├─ 进水电磁阀     : %s\n", bsp_get_inlet_valve_state() ? "■ 开启" : "□ 关闭");
+        printf("  ├─ 废水电磁阀     : %s\n", bsp_get_flush_valve_state() ? "■ 开启" : "□ 关闭");
+        printf("  └─ 增压水泵       : %s\n", bsp_get_pump_state() ? "■ 运行" : "□ 停止");
+        printf("\n");
 
-//         // 4. 用户套餐与计费参数
-//         printf(" [4] NVS 控制参数 (云端同步)\n");
-//         printf("  ├─ 设备软开关机   : %s\n", status.switch_state ? "开机" : "关机拦截");
-//         printf("  ├─ 当前计费模式   : %s\n", status.pay_mode == 0 ? "计时模式" : "计量模式");
+        // 4. 网络配置 (NVS)
+        printf(" [4] 网络与 MQTT 配置 (NVS)\n");
+        printf("  ├─ Net mode      : %s\n", net_cfg.mode == 0 ? "WiFi" : "4G");
+        if (net_cfg.mode == 0) {
+            printf("  ├─ WiFi SSID     : %s\n", net_cfg.ssid);
+        }
+        printf("  ├─ MQTT URL      : %s\n", net_cfg.full_url);
+        if (net_cfg.username[0] != '\0') {
+            char user_mask[80] = {0};
+            size_t ulen = strlen(net_cfg.username);
+            if (ulen <= 2) {
+                snprintf(user_mask, sizeof(user_mask), "**");
+            } else if (ulen <= 6) {
+                snprintf(user_mask, sizeof(user_mask), "%c**%c", net_cfg.username[0], net_cfg.username[ulen - 1]);
+            } else {
+                snprintf(user_mask, sizeof(user_mask), "%c%c**%c%c",
+                         net_cfg.username[0], net_cfg.username[1],
+                         net_cfg.username[ulen - 2], net_cfg.username[ulen - 1]);
+            }
+            printf("  └─ MQTT Username : %s\n", user_mask);
+        } else {
+            printf("  └─ MQTT Username : (empty)\n");
+        }
+        printf("\n");
 
-//         float display_capacity = status.capacity;
-//         if (status.pay_mode == 1) {
-//             display_capacity -= s_accumulated_liters; // 实时扣减零头显示
-//         }
-//         uint32_t display_total_flow = status.total_flow + (uint32_t)(s_accumulated_liters * 1000.0f);
+        // 5. 用户套餐与计费参数
+        printf(" [5] 套餐/滤芯/计费 (NVS)\n");
+        printf("  ├─ 设备软开关机   : %s\n", status.switch_state ? "开机" : "关机拦截");
+        printf("  ├─ 当前计费模式   : %s\n", status.pay_mode == 0 ? "计时模式" : "计量模式");
+
+        float display_capacity = (float)status.capacity;
+        if (status.pay_mode == 1) {
+            display_capacity -= s_accumulated_liters; // 实时扣减零头显示
+        }
+        uint32_t display_total_flow = (uint32_t)status.total_flow + (uint32_t)(s_accumulated_liters * 1000.0f);
         
-//         // 使用 %.2f 打印带两位小数的升数！
-//         printf("  ├─ 剩余天数/水量  : %d 天 / %.2f L\n", status.days, display_capacity);
-//         printf("  ├─ 历史总制水量   : %lu mL\n", display_total_flow);
+        printf("  ├─ 剩余天数/水量  : %d 天 / %.2f L\n", status.days, display_capacity);
+        printf("  ├─ 历史总制水量   : %lu mL (delta %.2f L)\n",
+               (unsigned long)display_total_flow, (double)s_accumulated_liters);
         
-//         printf("  └─ 滤芯剩余寿命   : F1=%d天, F2=%d天, F3=%d天, F4(RO)=%d天, F5=%d天\n", 
-//                 status.filter01, status.filter02, status.filter03, status.filter04, status.filter05);
-//         printf("========================================================\n\n");
-//     }
-// }
+        printf("  └─ 滤芯剩余       : ");
+        bool any_filter = false;
+        for (int i = 0; i < 9; i++) {
+            if (!status.filter_valid[i]) continue;
+            any_filter = true;
+            printf("L%d(%s) D:%d C:%d  ",
+                   i + 1,
+                   status.filter_type[i] == 1 ? "V" : "T",
+                   status.filter_days[i],
+                   status.filter_capacity[i]);
+        }
+        if (!any_filter) {
+            printf("none");
+        }
+        printf("\n");
+        printf("========================================================\n\n");
+    }
+}
 
 // ============================================================================
 // 初始化入口
@@ -551,13 +748,23 @@ void app_fsm_init(void) {
     s_wash_timer = xTimerCreate("wash_tmr", pdMS_TO_TICKS(18000), pdFALSE, NULL, wash_timer_cb);
     xTaskCreate(water_monitor_task, "water_dog", 3072, NULL, 5, NULL);
     // 【新增】启动诊断面板任务 (堆栈稍微给大一点点保证 printf 不溢出)
-    // xTaskCreate(system_dashboard_task, "sys_dash", 4096, NULL, 4, NULL);
+    xTaskCreate(system_dashboard_task, "sys_dash", 4096, NULL, 4, NULL);
 
 
     // 状态机初始状态
     s_state = FSM_STATE_WAIT_NET;
     s_water_state = WATER_STATE_INIT;
     transition_to(FSM_STATE_WAIT_NET, "fsm init");
+
+    uint8_t pump_spec = 0;
+    if (app_storage_get_pump_spec(&pump_spec) == ESP_OK) {
+        s_pump_spec_cached = pump_spec;
+        if (pump_spec == 1) {
+            s_pump_limit_over = 2.0f;
+        } else if (pump_spec == 2) {
+            s_pump_limit_over = 3.0f;
+        }
+    }
 
     // 规则：开机流程 -> 执行一次自动冲洗
     esp_event_post(WATER_INTERNAL_EVENTS, WATER_EV_TRIGGER_WASH, NULL, 0, pdMS_TO_TICKS(100));

@@ -21,6 +21,9 @@ int bsp_sensor_get_tds_backup(void);
 uint32_t bsp_sensor_get_flow_pulses(void);
 void bsp_sensor_clear_flow_pulses(void);
 
+float bsp_sensor_get_pump_current(void);
+void bsp_sensor_pump_current_calibrate_zero(void);
+
 #ifdef __cplusplus
 }
 #endif

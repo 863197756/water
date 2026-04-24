@@ -2,6 +2,8 @@
 #include "driver/gpio.h"
 #include "driver/pulse_cnt.h"
 #include "esp_adc/adc_oneshot.h"
+#include "esp_adc/adc_cali.h"
+#include "esp_adc/adc_cali_scheme.h"
 #include "esp_log.h"
 #include "esp_event.h"
 #include "freertos/FreeRTOS.h"
@@ -22,9 +24,14 @@ static const char *TAG = "BSP_SENSOR";
 #define ADC_CHAN_TDS_BACKUP ADC_CHANNEL_4 // IO 32
 #define ADC_CHAN_TDS_IN     ADC_CHANNEL_5 // IO 33
 #define ADC_CHAN_TEMP_NTC   ADC_CHANNEL_6 // IO 34
+#define ADC_CHAN_CURRENT_PUMP ADC_CHANNEL_3 // IO 39
 
 static adc_oneshot_unit_handle_t s_adc1_handle;
 static pcnt_unit_handle_t s_pcnt_unit;
+static adc_cali_handle_t s_pump_cali_handle = NULL;
+static bool s_pump_cali_enabled = false;
+static int s_pump_zero_mv = 0;
+static bool s_pump_zero_enabled = false;
 
 // --- 状态缓存 ---
 static bool s_last_low_press = true;  // 假设初始正常
@@ -95,14 +102,44 @@ void bsp_sensor_init(void) {
     adc_oneshot_unit_init_cfg_t init_config = { .unit_id = ADC_UNIT_1 };
     ESP_ERROR_CHECK(adc_oneshot_new_unit(&init_config, &s_adc1_handle));
 
-    adc_oneshot_chan_cfg_t config = {
+adc_oneshot_chan_cfg_t config_11db = {
         .bitwidth = ADC_BITWIDTH_DEFAULT,
-        .atten = ADC_ATTEN_DB_11 // 支持测量 0 ~ 3.3V
+        .atten = ADC_ATTEN_DB_12
     };
-    adc_oneshot_config_channel(s_adc1_handle, ADC_CHAN_TDS_OUT, &config);
-    adc_oneshot_config_channel(s_adc1_handle, ADC_CHAN_TDS_BACKUP, &config);
-    adc_oneshot_config_channel(s_adc1_handle, ADC_CHAN_TDS_IN, &config);
-    adc_oneshot_config_channel(s_adc1_handle, ADC_CHAN_TEMP_NTC, &config);
+    adc_oneshot_config_channel(s_adc1_handle, ADC_CHAN_TDS_OUT, &config_11db);
+    adc_oneshot_config_channel(s_adc1_handle, ADC_CHAN_TDS_BACKUP, &config_11db);
+    adc_oneshot_config_channel(s_adc1_handle, ADC_CHAN_TDS_IN, &config_11db);
+    adc_oneshot_config_channel(s_adc1_handle, ADC_CHAN_TEMP_NTC, &config_11db);
+    // 2. 🌟 新增：专门为水泵电流配置 6dB (支持 0 ~ 1.75V，精度翻倍！)
+    adc_oneshot_chan_cfg_t config_6db = {
+        .bitwidth = ADC_BITWIDTH_DEFAULT,
+        .atten = ADC_ATTEN_DB_6  
+    };
+    adc_oneshot_config_channel(s_adc1_handle, ADC_CHAN_CURRENT_PUMP, &config_6db);
+
+#if ADC_CALI_SCHEME_CURVE_FITTING_SUPPORTED
+    adc_cali_curve_fitting_config_t cali_cfg = {
+        .unit_id = ADC_UNIT_1,
+        .chan = ADC_CHAN_CURRENT_PUMP,
+        .atten = ADC_ATTEN_DB_6,
+        .bitwidth = ADC_BITWIDTH_DEFAULT,
+    };
+    if (adc_cali_create_scheme_curve_fitting(&cali_cfg, &s_pump_cali_handle) == ESP_OK) {
+        s_pump_cali_enabled = true;
+    }
+#elif ADC_CALI_SCHEME_LINE_FITTING_SUPPORTED
+    adc_cali_line_fitting_config_t cali_cfg = {
+        .unit_id = ADC_UNIT_1,
+        .atten = ADC_ATTEN_DB_6,
+        .bitwidth = ADC_BITWIDTH_DEFAULT,
+#if CONFIG_IDF_TARGET_ESP32
+        .default_vref = 1100,
+#endif
+    };
+    if (adc_cali_create_scheme_line_fitting(&cali_cfg, &s_pump_cali_handle) == ESP_OK) {
+        s_pump_cali_enabled = true;
+    }
+#endif
 
     // 3. 初始化 PCNT 流量计脉冲计数
     pcnt_unit_config_t unit_config = {
@@ -210,4 +247,57 @@ uint32_t bsp_sensor_get_flow_pulses(void) {
 
 void bsp_sensor_clear_flow_pulses(void) {
     pcnt_unit_clear_count(s_pcnt_unit);
+}
+
+float bsp_sensor_get_pump_current(void) {
+    int raw_sum = 0;
+    int sample_count = 10; // 连续采样 10 次
+    
+    for (int i = 0; i < sample_count; i++) {
+        int raw = 0;
+        adc_oneshot_read(s_adc1_handle, ADC_CHAN_CURRENT_PUMP, &raw);
+        raw_sum += raw;
+    }
+    
+    int raw_avg = raw_sum / sample_count;
+
+    int mv = 0;
+    if (s_pump_cali_enabled && s_pump_cali_handle) {
+        if (adc_cali_raw_to_voltage(s_pump_cali_handle, raw_avg, &mv) != ESP_OK) {
+            mv = (int)((float)raw_avg * 2200.0f / 4095.0f);
+        }
+    } else {
+        mv = (int)((float)raw_avg * 2200.0f / 4095.0f);
+    }
+
+    if (s_pump_zero_enabled) {
+        mv -= s_pump_zero_mv;
+        if (mv < 0) mv = 0;
+    }
+
+    float current_A = (float)mv / 481.0f;
+    return current_A;
+}
+
+void bsp_sensor_pump_current_calibrate_zero(void) {
+    if (!s_pump_zero_enabled) return;
+    int raw_sum = 0;
+    int sample_count = 20;
+    for (int i = 0; i < sample_count; i++) {
+        int raw = 0;
+        adc_oneshot_read(s_adc1_handle, ADC_CHAN_CURRENT_PUMP, &raw);
+        raw_sum += raw;
+        vTaskDelay(pdMS_TO_TICKS(5));
+    }
+    int raw_avg = raw_sum / sample_count;
+
+    int mv = 0;
+    if (s_pump_cali_enabled && s_pump_cali_handle) {
+        if (adc_cali_raw_to_voltage(s_pump_cali_handle, raw_avg, &mv) != ESP_OK) {
+            mv = (int)((float)raw_avg * 2200.0f / 4095.0f);
+        }
+    } else {
+        mv = (int)((float)raw_avg * 2200.0f / 4095.0f);
+    }
+    s_pump_zero_mv = mv;
 }
