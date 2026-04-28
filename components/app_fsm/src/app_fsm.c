@@ -748,7 +748,7 @@ void app_fsm_init(void) {
     s_wash_timer = xTimerCreate("wash_tmr", pdMS_TO_TICKS(18000), pdFALSE, NULL, wash_timer_cb);
     xTaskCreate(water_monitor_task, "water_dog", 3072, NULL, 5, NULL);
     // 【新增】启动诊断面板任务 (堆栈稍微给大一点点保证 printf 不溢出)
-    xTaskCreate(system_dashboard_task, "sys_dash", 4096, NULL, 4, NULL);
+    // xTaskCreate(system_dashboard_task, "sys_dash", 4096, NULL, 4, NULL);
 
 
     // 状态机初始状态

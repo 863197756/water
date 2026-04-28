@@ -45,7 +45,7 @@
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
 
-#include "json_parser.h"
+#include "cJSON.h"
 
 #include "app_events.h"
 #include "app_storage.h"
@@ -214,13 +214,61 @@ static uint16_t prov_payload_max(void) {
     return max;
 }
 
-static void prov_log_rx_json(jparse_ctx_t *jctx, const char *json, int len) {
+static void prov_log_ble_rx_raw(const uint8_t *buf, int len) {
+    if (!buf || len <= 0) return;
+
+    int n = len;
+    if (n > 64) n = 64;
+
+    char ascii[65] = {0};
+    for (int i = 0; i < n; i++) {
+        uint8_t c = buf[i];
+        if (c == '\r' || c == '\n' || c == '\t' || (c >= 0x20 && c <= 0x7e)) {
+            ascii[i] = (char)c;
+        } else {
+            ascii[i] = '.';
+        }
+    }
+    ascii[n] = 0;
+
+    char hex[3 * 64 + 1] = {0};
+    int pos = 0;
+    for (int i = 0; i < n; i++) {
+        int w = snprintf(hex + pos, sizeof(hex) - (size_t)pos, "%s%02X", (i == 0) ? "" : " ", buf[i]);
+        if (w <= 0) break;
+        pos += w;
+        if ((size_t)pos >= sizeof(hex)) break;
+    }
+
+    PROV_I("BLE RX RAW len=%d ascii=\"%s\"", len, ascii);
+    PROV_I("BLE RX RAW len=%d hex=%s", len, hex);
+}
+
+static bool prov_cjson_get_int(cJSON *root, const char *key, int *out_val) {
+    if (!root || !key || !out_val) return false;
+    cJSON *item = cJSON_GetObjectItemCaseSensitive(root, key);
+    if (!item || !cJSON_IsNumber(item)) return false;
+    *out_val = item->valueint;
+    return true;
+}
+
+static bool prov_cjson_get_string(cJSON *root, const char *key, char *out, size_t out_sz) {
+    if (!root || !key || !out || out_sz == 0) return false;
+    out[0] = 0;
+    cJSON *item = cJSON_GetObjectItemCaseSensitive(root, key);
+    if (!item || !cJSON_IsString(item) || !item->valuestring) return false;
+    strncpy(out, item->valuestring, out_sz - 1);
+    out[out_sz - 1] = 0;
+    return true;
+}
+
+static void prov_log_rx_json(cJSON *root, const char *json, int len) {
     int ival = 0;
-    if (json_obj_get_int(jctx, "statusBLE", &ival) == 0) {
+    if (prov_cjson_get_int(root, "statusBLE", &ival)) {
         PROV_I("RX statusBLE=%d (len=%d, step=%s, net_mode=%d)", ival, len, prov_step_str(s_step), s_net_mode);
         return;
     }
-    if (json_obj_get_int(jctx, "statusNet", &ival) == 0) {
+    if (prov_cjson_get_int(root, "statusNet", &ival)) {
         PROV_I("RX statusNet=%d (len=%d, step=%s)", ival, len, prov_step_str(s_step));
         return;
     }
@@ -230,11 +278,11 @@ static void prov_log_rx_json(jparse_ctx_t *jctx, const char *json, int len) {
     char username[64] = {0};
     char password[65] = {0};
 
-    bool has_ssid = (json_obj_get_string(jctx, "ssid", ssid, sizeof(ssid)) == 0);
-    bool has_mqttserver = (json_obj_get_string(jctx, "mqttserver", mqttserver, sizeof(mqttserver)) == 0);
-    (void)json_obj_get_string(jctx, "username", username, sizeof(username));
+    bool has_ssid = prov_cjson_get_string(root, "ssid", ssid, sizeof(ssid));
+    bool has_mqttserver = prov_cjson_get_string(root, "mqttserver", mqttserver, sizeof(mqttserver));
+    (void)prov_cjson_get_string(root, "username", username, sizeof(username));
 
-    bool has_password = (json_obj_get_string(jctx, "password", password, sizeof(password)) == 0);
+    bool has_password = prov_cjson_get_string(root, "password", password, sizeof(password));
     int pwd_len = has_password ? (int)strlen(password) : 0;
 
     if (has_ssid) {
@@ -580,6 +628,7 @@ static int gatt_access_cb(uint16_t conn_handle, uint16_t attr_handle,
     if (len <= 0) {
         return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
     }
+    prov_log_ble_rx_raw(buf, len);
 
     if (buf[0] == '{') {
         prov_handle_json(buf, len);
@@ -686,54 +735,53 @@ static const struct ble_gatt_svc_def gatt_svcs[] = {
 // -----------------------------
 static void prov_handle_json(uint8_t *data, int len) {
     // data 已确保以 '\0' 结尾
-    jparse_ctx_t jctx;
-    if (json_parse_start(&jctx, (char *)data, len) != 0) {
+    cJSON *root = cJSON_Parse((char *)data);
+    if (!root) {
+        PROV_W("RX JSON parse failed (len=%d, step=%s, net_mode=%d): %s", len, prov_step_str(s_step), s_net_mode, (char *)data);
         return;
     }
-    prov_log_rx_json(&jctx, (char *)data, len);
+
+    prov_log_rx_json(root, (char *)data, len);
 
     int ival = 0;
-
-    // Step 1/5: statusBLE
-    if (json_obj_get_int(&jctx, "statusBLE", &ival) == 0) {
+    if (prov_cjson_get_int(root, "statusBLE", &ival)) {
         if (ival == 0) {
             if (s_step != PROV_STEP_WAIT_BLE_OPEN) {
                 PROV_W("step mismatch for statusBLE=0, cur=%s", prov_step_str(s_step));
-                json_parse_end(&jctx);
+                cJSON_Delete(root);
                 return;
             }
             prov_send_kv_int("statusBLE", 0);
             prov_set_step(PROV_STEP_WAIT_NET_MODE, "statusBLE open");
-            json_parse_end(&jctx);
+            cJSON_Delete(root);
             return;
         }
         if (ival == 1) {
             if (s_step != PROV_STEP_WAIT_BLE_CLOSE) {
                 PROV_W("step mismatch for statusBLE=1, cur=%s", prov_step_str(s_step));
-                json_parse_end(&jctx);
+                cJSON_Delete(root);
                 return;
             }
             PROV_I("BLE close requested by client");
             prov_send_kv_int("statusBLE", 1);
             prov_set_step(PROV_STEP_DONE, "statusBLE close");
-            // 提前关闭配网窗口：停止广播并停止计时器
             s_prov_window_open = false;
             if (s_prov_timer) esp_timer_stop(s_prov_timer);
             prov_stop_advertising();
-            // 主动断开 BLE（对齐文档“请求关闭”）
             if (s_conn_handle != BLE_HS_CONN_HANDLE_NONE) {
                 ble_gap_terminate(s_conn_handle, BLE_ERR_REM_USER_CONN_TERM);
             }
-            json_parse_end(&jctx);
+            cJSON_Delete(root);
             return;
         }
+        cJSON_Delete(root);
+        return;
     }
 
-    // Step 2: statusNet
-    if (json_obj_get_int(&jctx, "statusNet", &ival) == 0) {
+    if (prov_cjson_get_int(root, "statusNet", &ival)) {
         if (s_step != PROV_STEP_WAIT_NET_MODE) {
             PROV_W("step mismatch for statusNet, cur=%s", prov_step_str(s_step));
-            json_parse_end(&jctx);
+            cJSON_Delete(root);
             return;
         }
 
@@ -753,30 +801,26 @@ static void prov_handle_json(uint8_t *data, int len) {
             prov_set_step(PROV_STEP_WAIT_MQTT_CFG, "net mode=4g");
         }
 
-        json_parse_end(&jctx);
+        cJSON_Delete(root);
         return;
     }
 
-    // Step 3: WiFi 配置（仅 WiFi 模式）
     char ssid[33] = {0};
-    char password[65] = {0};
-    int has_ssid = (json_obj_get_string(&jctx, "ssid", ssid, sizeof(ssid)) == 0);
-    int has_pwd  = (json_obj_get_string(&jctx, "password", password, sizeof(password)) == 0);
-    // 注意：MQTT 配置同样包含字段 "password"，
-    // WiFi 配置必须带 ssid 才认为是 WiFi 配置，避免把 MQTT JSON 误判成 WiFi JSON。
-    if (has_ssid) {
+    if (prov_cjson_get_string(root, "ssid", ssid, sizeof(ssid))) {
+        char password[65] = {0};
+        bool has_pwd = prov_cjson_get_string(root, "password", password, sizeof(password));
+
         if (s_step != PROV_STEP_WAIT_WIFI_CFG || s_net_mode != 0) {
             PROV_W("step mismatch for wifi cfg, cur=%s net_mode=%d", prov_step_str(s_step), s_net_mode);
-            json_parse_end(&jctx);
+            cJSON_Delete(root);
             return;
         }
-        if (!has_ssid || !has_pwd) {
-            PROV_W("wifi cfg missing field: has_ssid=%d has_pwd=%d", has_ssid, has_pwd);
-            json_parse_end(&jctx);
+        if (!has_pwd) {
+            PROV_W("wifi cfg missing field: password");
+            cJSON_Delete(root);
             return;
         }
 
-        // 保存到 NVS
         net_config_t cfg;
         if (app_storage_load_net_config(&cfg) != ESP_OK) memset(&cfg, 0, sizeof(cfg));
         cfg.mode = 0;
@@ -784,7 +828,6 @@ static void prov_handle_json(uint8_t *data, int len) {
         strncpy(cfg.password, password, sizeof(cfg.password) - 1);
         app_storage_save_net_config(&cfg);
 
-        // 开始连接 Wi-Fi：statusWiFi=0
         s_wifi_prov_connecting = true;
         s_wifi_prov_retry = 0;
         prov_set_step(PROV_STEP_WAIT_WIFI_RESULT, "wifi connect start");
@@ -806,23 +849,22 @@ static void prov_handle_json(uint8_t *data, int len) {
             prov_send_kv_int("statusWiFi", 2);
         }
 
-        json_parse_end(&jctx);
+        cJSON_Delete(root);
         return;
     }
 
-    // Step 4: MQTT 配置
     char mqtt_server_buf[128] = {0};
-    if (json_obj_get_string(&jctx, "mqttserver", mqtt_server_buf, sizeof(mqtt_server_buf)) == 0) {
+    if (prov_cjson_get_string(root, "mqttserver", mqtt_server_buf, sizeof(mqtt_server_buf))) {
         if (s_step != PROV_STEP_WAIT_MQTT_CFG) {
             PROV_W("step mismatch for mqtt cfg, cur=%s", prov_step_str(s_step));
-            json_parse_end(&jctx);
+            cJSON_Delete(root);
             return;
         }
 
         char username_buf[64] = {0};
         char password_buf[64] = {0};
-        json_obj_get_string(&jctx, "username", username_buf, sizeof(username_buf));
-        json_obj_get_string(&jctx, "password", password_buf, sizeof(password_buf));
+        (void)prov_cjson_get_string(root, "username", username_buf, sizeof(username_buf));
+        (void)prov_cjson_get_string(root, "password", password_buf, sizeof(password_buf));
 
         net_config_t cfg;
         if (app_storage_load_net_config(&cfg) != ESP_OK) memset(&cfg, 0, sizeof(cfg));
@@ -843,19 +885,18 @@ static void prov_handle_json(uint8_t *data, int len) {
         app_storage_set_pending_init(1);
         app_events_post_mqtt_config_updated();
 
-        // 等待 MQTT 结果反馈
         s_mqtt_waiting = true;
         if (s_mqtt_timer) {
             esp_timer_stop(s_mqtt_timer);
-            esp_timer_start_once(s_mqtt_timer, 20000000ULL); // 20s 超时
+            esp_timer_start_once(s_mqtt_timer, 20000000ULL);
         }
 
         prov_set_step(PROV_STEP_WAIT_BLE_CLOSE, "mqtt cfg received");
-        json_parse_end(&jctx);
+        cJSON_Delete(root);
         return;
     }
 
-    json_parse_end(&jctx);
+    cJSON_Delete(root);
 }
 
 // -----------------------------

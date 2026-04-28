@@ -1,6 +1,5 @@
 #include "protocol.h"
 #include "cJSON.h"          // 官方组件，用于生成
-#include "json_parser.h"    // 你的组件，用于解析
 #include "esp_log.h"
 #include <string.h>
 #include <stdlib.h>
