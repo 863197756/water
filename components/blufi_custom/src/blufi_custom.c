@@ -214,6 +214,46 @@ static uint16_t prov_payload_max(void) {
     return max;
 }
 
+static void prov_log_rx_json(jparse_ctx_t *jctx, const char *json, int len) {
+    int ival = 0;
+    if (json_obj_get_int(jctx, "statusBLE", &ival) == 0) {
+        PROV_I("RX statusBLE=%d (len=%d, step=%s, net_mode=%d)", ival, len, prov_step_str(s_step), s_net_mode);
+        return;
+    }
+    if (json_obj_get_int(jctx, "statusNet", &ival) == 0) {
+        PROV_I("RX statusNet=%d (len=%d, step=%s)", ival, len, prov_step_str(s_step));
+        return;
+    }
+
+    char ssid[33] = {0};
+    char mqttserver[128] = {0};
+    char username[64] = {0};
+    char password[65] = {0};
+
+    bool has_ssid = (json_obj_get_string(jctx, "ssid", ssid, sizeof(ssid)) == 0);
+    bool has_mqttserver = (json_obj_get_string(jctx, "mqttserver", mqttserver, sizeof(mqttserver)) == 0);
+    (void)json_obj_get_string(jctx, "username", username, sizeof(username));
+
+    bool has_password = (json_obj_get_string(jctx, "password", password, sizeof(password)) == 0);
+    int pwd_len = has_password ? (int)strlen(password) : 0;
+
+    if (has_ssid) {
+        PROV_I("RX wifi_cfg ssid=\"%s\" password=\"%s\" (pwd_len=%d, len=%d, step=%s)", ssid, password, pwd_len, len, prov_step_str(s_step));
+        return;
+    }
+    if (has_mqttserver) {
+        PROV_I("RX mqtt_cfg server=\"%s\" username=\"%s\" password=\"%s\" (pwd_len=%d, len=%d, step=%s)", mqttserver, username, password, pwd_len, len, prov_step_str(s_step));
+        return;
+    }
+
+    if (has_password) {
+        PROV_I("RX JSON (len=%d, step=%s, net_mode=%d): %s", len, prov_step_str(s_step), s_net_mode, json);
+        return;
+    }
+
+    PROV_I("RX JSON (len=%d, step=%s, net_mode=%d): %s", len, prov_step_str(s_step), s_net_mode, json);
+}
+
 // -----------------------------
 // BLE Notify：发送 JSON
 // -----------------------------
@@ -349,6 +389,8 @@ static void prov_worker_task(void *arg) {
 
         if (item.type == PROV_WORK_WIFI_CONNECT) {
             esp_err_t err;
+
+            PROV_I("Wi-Fi connect start ssid=\"%s\" password=\"%s\"", item.wifi.ssid, item.wifi.password);
 
             s_wifi_ignore_disconnect_once = true;
             err = esp_wifi_stop();
@@ -529,6 +571,7 @@ static int gatt_access_cb(uint16_t conn_handle, uint16_t attr_handle,
     }
 
     if (!s_prov_window_open) {
+        PROV_W("RX dropped: provision window closed (step=%s)", prov_step_str(s_step));
         return BLE_ATT_ERR_WRITE_NOT_PERMITTED;
     }
 
@@ -565,12 +608,14 @@ static int gatt_access_cb(uint16_t conn_handle, uint16_t attr_handle,
         s_rx_frag_active = true;
         s_rx_frag_total = total;
         s_rx_frag_len = 0;
+        PROV_I("RX FRAG start total=%u (step=%s)", (unsigned)total, prov_step_str(s_step));
     }
 
     if (!s_rx_frag_active) {
         return 0;
     }
     if (offset != s_rx_frag_len) {
+        PROV_W("RX FRAG offset mismatch exp=%u got=%u (total=%u)", (unsigned)s_rx_frag_len, (unsigned)offset, (unsigned)s_rx_frag_total);
         s_rx_frag_active = false;
         s_rx_frag_total = 0;
         s_rx_frag_len = 0;
@@ -596,6 +641,7 @@ static int gatt_access_cb(uint16_t conn_handle, uint16_t attr_handle,
         s_rx_frag_buf[s_rx_frag_len] = 0;
         s_rx_frag_active = false;
         s_rx_frag_total = 0;
+        PROV_I("RX FRAG complete len=%u (step=%s)", (unsigned)s_rx_frag_len, prov_step_str(s_step));
         prov_handle_json(s_rx_frag_buf, s_rx_frag_len);
     }
     return 0;
@@ -640,12 +686,11 @@ static const struct ble_gatt_svc_def gatt_svcs[] = {
 // -----------------------------
 static void prov_handle_json(uint8_t *data, int len) {
     // data 已确保以 '\0' 结尾
-    PROV_I("RX JSON (len=%d, step=%s, net_mode=%d): %s", len, prov_step_str(s_step), s_net_mode, (char *)data);
-
     jparse_ctx_t jctx;
     if (json_parse_start(&jctx, (char *)data, len) != 0) {
         return;
     }
+    prov_log_rx_json(&jctx, (char *)data, len);
 
     int ival = 0;
 
@@ -668,6 +713,7 @@ static void prov_handle_json(uint8_t *data, int len) {
                 json_parse_end(&jctx);
                 return;
             }
+            PROV_I("BLE close requested by client");
             prov_send_kv_int("statusBLE", 1);
             prov_set_step(PROV_STEP_DONE, "statusBLE close");
             // 提前关闭配网窗口：停止广播并停止计时器
@@ -692,6 +738,7 @@ static void prov_handle_json(uint8_t *data, int len) {
         }
 
         s_net_mode = ival;
+        PROV_I("Net mode selected: %d", s_net_mode);
         net_config_t cfg;
         if (app_storage_load_net_config(&cfg) != ESP_OK) memset(&cfg, 0, sizeof(cfg));
         cfg.mode = s_net_mode;
@@ -784,6 +831,7 @@ static void prov_handle_json(uint8_t *data, int len) {
         char host[64] = {0};
         int port = 0;
         prov_parse_mqtt_server(mqtt_server_buf, scheme, sizeof(scheme), host, sizeof(host), &port);
+        PROV_I("MQTT cfg parsed: %s://%s:%d username=\"%s\" password=\"%s\"", scheme, host, port, username_buf, password_buf);
         strncpy(cfg.mqtt_host, host, sizeof(cfg.mqtt_host) - 1);
         cfg.mqtt_port = port;
 
@@ -927,6 +975,7 @@ static void prov_start_advertising(void) {
 static void prov_stop_advertising(void) {
     if (ble_gap_adv_active()) {
         ble_gap_adv_stop();
+        PROV_I("advertising stopped");
     }
 }
 
